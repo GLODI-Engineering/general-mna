@@ -1,0 +1,14 @@
+[package]
+name = "elspice-mna"
+version = "0.1.0"
+edition = "2021"
+description = "Educational modified nodal analysis and converter averaging built on spice-core"
+license = "AGPL-3.0-or-later"
+publish = false
+
+[lib]
+name = "elspice_mna"
+
+[dependencies]
+spice-core = { path = "../spice-lsp/servers/core" }
+
