@@ -8,7 +8,12 @@ publish = false
 
 [lib]
 name = "elspice_mna"
+crate-type = ["rlib", "cdylib"]
+
+[features]
+default = []
+python = ["dep:pyo3"]
 
 [dependencies]
+pyo3 = { version = "0.27", features = ["extension-module"], optional = true }
 spice-core = { path = "../spice-lsp/servers/core" }
-

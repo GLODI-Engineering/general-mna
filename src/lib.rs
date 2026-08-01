@@ -19,6 +19,9 @@ mod matrix;
 mod numeric;
 mod system;
 
+#[cfg(feature = "python")]
+mod python;
+
 pub use averaging::{average, small_signal_duty_input, AveragingError, WeightedPhase};
 pub use builder::{BuildError, BuildOptions, MnaBuilder, SwitchState, UnsupportedElementPolicy};
 pub use expression::{EvaluationError, Expression};

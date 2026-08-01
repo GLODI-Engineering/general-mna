@@ -122,6 +122,47 @@ The same DTO can be exported by `wasm-bindgen` for a browser application. Keep
 symbolic matrix reduction in SymPy; use this crate's numeric reduction for an
 interactive browser after parameter values are supplied.
 
+### Native Python binding
+
+The optional PyO3 module exposes both symbolic MNA construction and native
+numeric state-space reduction:
+
+```bash
+./python/build_binding.sh
+PYTHONPATH=python python3 -c \
+  "from elspice_mna import build_mna; print(build_mna('R1 1 0 1k'))"
+```
+
+For a packaged installation, `python/pyproject.toml` is configured for
+Maturin and builds the same `elspice_mna._native` module.
+
+## Verified converter examples
+
+The Python layer uses the Rust binding to construct the exact ON and OFF MNA
+topologies, reduces each descriptor system symbolically with SymPy, and then
+performs state-space averaging. Separate textbook Kirchhoff equations provide
+the verification oracle—generated artifacts are rejected if any symbolic
+matrix or transfer-function residual is nonzero.
+
+Generated notebooks:
+
+- [`notebooks/buck_state_space_averaging.ipynb`](notebooks/buck_state_space_averaging.ipynb)
+- [`notebooks/boost_state_space_averaging.ipynb`](notebooks/boost_state_space_averaging.ipynb)
+- [`notebooks/buck_boost_state_space_averaging.ipynb`](notebooks/buck_boost_state_space_averaging.ipynb)
+
+Generated reports:
+
+- [`artifacts/buck_converter_state_space.pdf`](artifacts/buck_converter_state_space.pdf)
+- [`artifacts/boost_converter_state_space.pdf`](artifacts/boost_converter_state_space.pdf)
+- [`artifacts/buck_boost_converter_state_space.pdf`](artifacts/buck_boost_converter_state_space.pdf)
+
+Regenerate and verify everything with:
+
+```bash
+make artifacts
+make test
+```
+
 ## Development
 
 The parser dependency is currently a sibling path so local parser work is used
@@ -141,4 +182,3 @@ cargo fmt --all -- --check
 cargo clippy --all-targets -- -D warnings
 cargo test --all-targets
 ```
-

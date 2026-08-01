@@ -1,4 +1,8 @@
 /target
 Cargo.lock
-*.pdf
-
+python/elspice_mna/_native.so
+__pycache__/
+*.pyc
+artifacts/*.aux
+artifacts/*.log
+artifacts/*.out

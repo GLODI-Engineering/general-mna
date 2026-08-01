@@ -1,0 +1,17 @@
+[build-system]
+requires = ["maturin>=1.8,<2"]
+build-backend = "maturin"
+
+[project]
+name = "elspice-mna"
+version = "0.1.0"
+description = "Python and SymPy bindings for the elspice-mna Rust library"
+requires-python = ">=3.10"
+dependencies = ["sympy>=1.12", "numpy>=1.26"]
+
+[tool.maturin]
+manifest-path = "../Cargo.toml"
+features = ["python"]
+module-name = "elspice_mna._native"
+python-source = "."
+
