@@ -1,0 +1,4 @@
+interface:
+  display_name: "Verify Circuit Model"
+  short_description: "Check MNA models against analytic references"
+  default_prompt: "Use $verify-circuit-model to verify this MNA or converter model end to end."

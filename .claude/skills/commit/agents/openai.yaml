@@ -1,0 +1,4 @@
+interface:
+  display_name: "Commit ElSpice MNA"
+  short_description: "Run all gates and make a clean commit"
+  default_prompt: "Use $commit to validate, journal, and commit the current elspice-mna changes."

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Record ElSpice Gotcha"
+  short_description: "Preserve a reproducible MNA development trap"
+  default_prompt: "Use $record-gotcha to document this reproducible elspice-mna issue for future contributors."

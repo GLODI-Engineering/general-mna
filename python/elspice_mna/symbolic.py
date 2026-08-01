@@ -82,4 +82,3 @@ def simplified_equal(left: sp.Matrix, right: sp.Matrix) -> bool:
         for row in range(left.rows)
         for column in range(left.cols)
     )
-

@@ -14,4 +14,3 @@ manifest-path = "../Cargo.toml"
 features = ["python"]
 module-name = "elspice_mna._native"
 python-source = "."
-

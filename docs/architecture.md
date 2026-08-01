@@ -77,4 +77,3 @@ q_d = (B_on - B_off) U - (A_on - A_off) X
 
 and enters the descriptor equation as an additional input column multiplying
 the small duty perturbation `d`.
-

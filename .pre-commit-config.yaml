@@ -1,0 +1,65 @@
+default_language_version:
+  python: python3
+
+default_install_hook_types:
+  - pre-commit
+  - commit-msg
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+        exclude: \.md$
+      - id: end-of-file-fixer
+        exclude: '^(notebooks/|artifacts/)'
+      - id: check-yaml
+      - id: check-json
+      - id: check-toml
+      - id: check-added-large-files
+        args: ["--maxkb=1000"]
+      - id: check-merge-conflict
+      - id: check-case-conflict
+      - id: mixed-line-ending
+        args: ["--fix=lf"]
+
+  - repo: local
+    hooks:
+      - id: gotchas-index
+        name: regenerate docs/gotchas/INDEX.md
+        language: system
+        entry: bash scripts/gotchas-index.sh
+        files: '^docs/gotchas/GOTCHA-.*\.md$'
+        pass_filenames: false
+
+      - id: cargo-fmt
+        name: cargo fmt
+        language: system
+        entry: cargo fmt --all -- --check
+        types: [rust]
+        pass_filenames: false
+
+      - id: python-compile
+        name: compile Python sources
+        language: system
+        entry: python3 -m py_compile
+        types: [python]
+
+  - repo: https://github.com/compilerla/conventional-pre-commit
+    rev: v3.6.0
+    hooks:
+      - id: conventional-pre-commit
+        stages: [commit-msg]
+        args:
+          - "--strict"
+          - "feat"
+          - "fix"
+          - "docs"
+          - "style"
+          - "refactor"
+          - "perf"
+          - "test"
+          - "build"
+          - "ci"
+          - "chore"
+          - "revert"

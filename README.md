@@ -182,3 +182,16 @@ cargo fmt --all -- --check
 cargo clippy --all-targets -- -D warnings
 cargo test --all-targets
 ```
+
+### Contributor workflow
+
+Repository guidance is in [`AGENTS.md`](AGENTS.md). Install the file-hygiene,
+Rust-formatting, Python-compilation, gotcha-index, and Conventional Commit hooks
+once per clone:
+
+```bash
+pre-commit install --install-hooks
+```
+
+Recurring workflows live in [`.claude/skills`](.claude/skills), and the dated
+continuity log lives in [`docs/journal`](docs/journal).
