@@ -1,7 +1,8 @@
 use std::collections::BTreeMap;
 
 use elspice_mna::{
-    average, BuildError, BuildOptions, Expression, MnaBuilder, SwitchState, WeightedPhase,
+    average, BuildError, BuildOptions, Expression, MnaBuilder, StateSpaceError, SwitchState,
+    WeightedPhase,
 };
 use spice_core::Dialect;
 
@@ -75,6 +76,52 @@ fn mutual_inductance_uses_spice_coupling_coefficient_definition() {
     let second = index(&system, "I(L2)");
     assert!((evaluated.k[(first, second)] + 3.0).abs() < 1e-12);
     assert_eq!(evaluated.k[(first, second)], evaluated.k[(second, first)]);
+}
+
+#[test]
+fn capacitor_only_loop_reports_precise_singular_storage_error() {
+    // A floating triangle of capacitors with no resistive path to ground:
+    // the three node-voltage KCL rows sum to zero, so the reduced storage
+    // block is rank-deficient (one voltage is not independent of the rest).
+    let system = MnaBuilder::new(Dialect::Ngspice)
+        .build_fragment("C1 1 2 C\nC2 2 3 C\nC3 3 1 C")
+        .unwrap();
+    let evaluated = numeric(&system, &[("C", 1e-6)]);
+    let err = evaluated.to_state_space(1e-12).unwrap_err();
+
+    let message = err.to_string();
+    assert!(message.contains("capacitor-only loop"), "{message}");
+    match err {
+        StateSpaceError::SingularStorageBlock { unknown, block } => {
+            assert!(unknown.starts_with("V("), "{unknown}");
+            assert_eq!(block.len(), 3);
+        }
+        other => panic!("expected SingularStorageBlock, got {other:?}"),
+    }
+}
+
+#[test]
+fn perfectly_coupled_inductors_report_precise_singular_storage_error() {
+    // Two independently driven inductors coupled at k=1 (an ideal, lossless
+    // transformer with no leakage inductance) make the 2x2 inductance
+    // sub-matrix exactly singular: L1*L2*(1 - k^2) = 0.
+    let system = MnaBuilder::new(Dialect::Ngspice)
+        .build_fragment(
+            "V1 1 0 DC 1\nR1 1 2 1\nL1 2 0 1m\nV2 3 0 DC 1\nR2 3 4 1\nL2 4 0 1m\nK1 L1 L2 1",
+        )
+        .unwrap();
+    let evaluated = numeric(&system, &[]);
+    let err = evaluated.to_state_space(1e-12).unwrap_err();
+
+    let message = err.to_string();
+    assert!(message.contains("inductor-only cut-set"), "{message}");
+    match err {
+        StateSpaceError::SingularStorageBlock { unknown, block } => {
+            assert!(unknown.starts_with("I("), "{unknown}");
+            assert_eq!(block.len(), 2);
+        }
+        other => panic!("expected SingularStorageBlock, got {other:?}"),
+    }
 }
 
 #[test]

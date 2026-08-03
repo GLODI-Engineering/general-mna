@@ -96,10 +96,12 @@ impl NumericMnaSystem {
             let a_as = extract(&self.a, &algebraic_indices, &state_indices);
             let a_aa = extract(&self.a, &algebraic_indices, &algebraic_indices);
             let b_a = extract_rows(&self.b, &algebraic_indices);
-            let solved_as = solve(&a_aa, &a_as, tolerance)
-                .map_err(|_| StateSpaceError::SingularAlgebraicBlock)?;
-            let solved_b = solve(&a_aa, &b_a, tolerance)
-                .map_err(|_| StateSpaceError::SingularAlgebraicBlock)?;
+            let solved_as = solve(&a_aa, &a_as, tolerance).map_err(|pivot| {
+                StateSpaceError::singular_algebraic(&self.unknowns, &algebraic_indices, pivot)
+            })?;
+            let solved_b = solve(&a_aa, &b_a, tolerance).map_err(|pivot| {
+                StateSpaceError::singular_algebraic(&self.unknowns, &algebraic_indices, pivot)
+            })?;
             (
                 subtract(&a_ss, &multiply(&a_sa, &solved_as)),
                 subtract(&b_s, &multiply(&a_sa, &solved_b)),
@@ -107,10 +109,12 @@ impl NumericMnaSystem {
         };
 
         let negative_a = a_reduced.map(|value| -*value);
-        let state_a = solve(&k_ss, &negative_a, tolerance)
-            .map_err(|_| StateSpaceError::SingularStorageBlock)?;
-        let state_b = solve(&k_ss, &b_reduced, tolerance)
-            .map_err(|_| StateSpaceError::SingularStorageBlock)?;
+        let state_a = solve(&k_ss, &negative_a, tolerance).map_err(|pivot| {
+            StateSpaceError::singular_storage(&self.unknowns, &state_indices, pivot)
+        })?;
+        let state_b = solve(&k_ss, &b_reduced, tolerance).map_err(|pivot| {
+            StateSpaceError::singular_storage(&self.unknowns, &state_indices, pivot)
+        })?;
 
         Ok(NumericStateSpace {
             a: state_a,
@@ -178,10 +182,18 @@ fn subtract(lhs: &Matrix<f64>, rhs: &Matrix<f64>) -> Matrix<f64> {
     .expect("zipped equal matrices preserve shape")
 }
 
-fn solve(coefficients: &Matrix<f64>, rhs: &Matrix<f64>, tolerance: f64) -> Result<Matrix<f64>, ()> {
+/// Solves `coefficients * x = rhs` by Gauss-Jordan elimination with partial
+/// pivoting. On failure, returns the index (within `coefficients`) of the
+/// column that had no usable pivot, so callers can report which unknown the
+/// singularity localizes to.
+fn solve(
+    coefficients: &Matrix<f64>,
+    rhs: &Matrix<f64>,
+    tolerance: f64,
+) -> Result<Matrix<f64>, usize> {
     let n = coefficients.rows();
     if coefficients.cols() != n || rhs.rows() != n {
-        return Err(());
+        return Err(0);
     }
     let rhs_cols = rhs.cols();
     let mut augmented = Matrix::filled(n, n + rhs_cols, 0.0);
@@ -201,9 +213,9 @@ fn solve(coefficients: &Matrix<f64>, rhs: &Matrix<f64>, tolerance: f64) -> Resul
                     .abs()
                     .total_cmp(&augmented[(*right, pivot_col)].abs())
             })
-            .ok_or(())?;
+            .ok_or(pivot_col)?;
         if augmented[(pivot_row, pivot_col)].abs() <= tolerance {
-            return Err(());
+            return Err(pivot_col);
         }
         if pivot_row != pivot_col {
             for col in 0..n + rhs_cols {
@@ -238,16 +250,49 @@ fn solve(coefficients: &Matrix<f64>, rhs: &Matrix<f64>, tolerance: f64) -> Resul
 }
 
 /// Error returned during descriptor-to-state-space reduction.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StateSpaceError {
     /// Matrix and name dimensions do not agree.
     InconsistentDimensions,
     /// No row of the storage matrix is dynamic.
     NoDynamicVariables,
     /// Algebraic constraints cannot be uniquely eliminated.
-    SingularAlgebraicBlock,
-    /// The reduced storage matrix is singular.
-    SingularStorageBlock,
+    SingularAlgebraicBlock {
+        /// The algebraic unknown whose equation had no usable pivot.
+        unknown: String,
+        /// All algebraic unknowns considered in the same elimination.
+        block: Vec<String>,
+    },
+    /// The reduced storage (capacitor/inductor) block is singular: the
+    /// circuit has fewer independent dynamic states than reactive elements.
+    SingularStorageBlock {
+        /// The state variable that turned out not to be independent.
+        unknown: String,
+        /// All capacitor-voltage/inductor-current states in the same block.
+        block: Vec<String>,
+    },
+}
+
+impl StateSpaceError {
+    fn singular_algebraic(unknowns: &[String], indices: &[usize], pivot: usize) -> Self {
+        Self::SingularAlgebraicBlock {
+            unknown: unknowns[indices[pivot]].clone(),
+            block: indices
+                .iter()
+                .map(|index| unknowns[*index].clone())
+                .collect(),
+        }
+    }
+
+    fn singular_storage(unknowns: &[String], indices: &[usize], pivot: usize) -> Self {
+        Self::SingularStorageBlock {
+            unknown: unknowns[indices[pivot]].clone(),
+            block: indices
+                .iter()
+                .map(|index| unknowns[*index].clone())
+                .collect(),
+        }
+    }
 }
 
 impl fmt::Display for StateSpaceError {
@@ -257,8 +302,23 @@ impl fmt::Display for StateSpaceError {
             Self::NoDynamicVariables => {
                 f.write_str("the circuit has no capacitor or inductor state")
             }
-            Self::SingularAlgebraicBlock => f.write_str("the algebraic MNA block is singular"),
-            Self::SingularStorageBlock => f.write_str("the reduced storage block is singular"),
+            Self::SingularAlgebraicBlock { unknown, block } => write!(
+                f,
+                "no unique solution for {unknown}: the algebraic (non-storage) equations for {{{}}} are linearly dependent — check for a loop of ideal voltage sources/VCVS elements or a cut-set of ideal current sources/VCCS elements among them",
+                block.join(", "),
+            ),
+            Self::SingularStorageBlock { unknown, block } => {
+                let hint = if unknown.starts_with("V(") {
+                    "a capacitor-only loop with no resistive path, so its voltage is not independent of the others — add a series resistor to break the loop"
+                } else {
+                    "an inductor-only cut-set with no resistive path, so its current is not independent of the others (or a redundant coupled-inductor `K` specification) — add a parallel resistor or check the coupling coefficients"
+                };
+                write!(
+                    f,
+                    "{unknown} is not an independent state variable among {{{}}}: likely {hint}",
+                    block.join(", "),
+                )
+            }
         }
     }
 }
