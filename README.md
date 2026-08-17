@@ -21,11 +21,18 @@ modified or imported by this repository.
 
 - Symbolic stamps for `R`, `C`, `L`, `V`, `I`, `G` (VCCS), `E` (VCVS), `F`
   (CCCS), and `H` (CCVS).
+- `D` (diode) as a companion-model conductance plus a Norton current source,
+  both left as per-instance symbolic parameters (`{name}_G`, `{name}_Ioff`)
+  rather than parsed from the netlist — this crate has no diode physics of
+  its own; an external caller (e.g. a piecewise-linear or nonlinear circuit
+  solver) supplies numeric values for those symbols via `evaluate()`,
+  potentially different ones every call. See
+  `NumericMnaSystem::input_values`/`::u` below.
 - Mutual inductance with the SPICE relation `M = k*sqrt(L1*L2)`.
 - Case-insensitive node, element, and controlling-source lookup.
 - SPICE numeric suffixes (`k`, `meg`, `m`, `u`, `n`, `p`, and others).
-- Explicit errors for unsupported nonlinear devices; they are never silently
-  removed from a circuit.
+- Explicit errors for devices with no linear-or-externally-parameterized
+  stamp (e.g. a BJT); they are never silently removed from a circuit.
 - Name-based `Ron`/`Roff` switch overrides suitable for converter phases.
 - Weighted descriptor averaging for any number of switching phases.
 - The two-phase small-signal duty perturbation vector.
@@ -35,10 +42,24 @@ modified or imported by this repository.
   TypeScript interfaces without committing the core crate to one binding
   framework.
 
-Nonlinear semiconductor linearization, subcircuit flattening, behavioral
-sources, and symbolic Schur-complement reduction are intentionally future
-work. The builder reports such devices instead of producing an incomplete
-matrix.
+Full nonlinear semiconductor device physics, subcircuit flattening,
+behavioral sources, and symbolic Schur-complement reduction are intentionally
+future work. The builder reports devices with no stamp at all instead of
+producing an incomplete matrix.
+
+### Numeric evaluation of source values (`NumericMnaSystem`)
+
+`MnaSystem::evaluate()` numerically evaluates `a`, `k`, `b`, and now also each
+input's own value (`input_values`) and the expanded right-hand side (`u`) —
+this matters for a source whose numeric value genuinely changes between
+`evaluate()` calls (a diode's `{name}_Ioff`, or `{name}_G`, resolved
+differently every simulation timestep by an external solver) as opposed to a
+netlist-declared `V`/`I` source whose literal value never changes after
+parsing. Evaluating an input's value is best-effort: a symbol with no entry
+in the `values` map (e.g. a duty ratio a caller only cares about symbolically
+while evaluating unrelated matrices) yields `f64::NAN` for that input rather
+than failing the whole `evaluate()` call, and contributes `0.0` (not `NAN`)
+to every row of `u`.
 
 ## Basic use
 

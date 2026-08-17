@@ -180,10 +180,47 @@ fn converter_switch_phases_average_with_duty_ratio() {
 
 #[test]
 fn nonlinear_devices_are_not_silently_discarded() {
+    // 'D' (diode) is intentionally supported now, as a companion-model conductance plus a
+    // Norton current source with per-instance symbolic parameters (see
+    // `diode_is_stamped_as_symbolic_conductance_plus_norton_current_source` below) — the split
+    // exists exactly so an external caller (e.g. a piecewise-linear circuit solver) can decide
+    // per-timestep numeric values without this crate knowing anything about diode physics. A
+    // device with no linear-or-externally-parameterized stamp at all, like a BJT, must still be
+    // reported rather than silently dropped.
     let error = MnaBuilder::new(Dialect::Ngspice)
-        .build_fragment("D1 1 0 diode_model")
+        .build_fragment("Q1 1 0 2 bjt_model")
         .unwrap_err();
     assert!(matches!(error, BuildError::UnsupportedElement(_)));
+}
+
+#[test]
+fn diode_is_stamped_as_symbolic_conductance_plus_norton_current_source() {
+    // D1 anode=1, cathode=0 (ground); companion model I = G*V + Ioff, with G and Ioff left as
+    // per-instance symbols (`D1_G`, `D1_Ioff`) for the caller to resolve numerically however it
+    // decides which segment of a piecewise-linear device curve is currently active.
+    let system = MnaBuilder::new(Dialect::Ngspice)
+        .build_fragment("D1 1 0 diode_model")
+        .unwrap();
+
+    assert_eq!(system.unknowns, ["V(1)"]);
+    assert_eq!(system.inputs, ["D1"]);
+    assert_eq!(system.a[(0, 0)].to_string(), "D1_G");
+    assert_eq!(system.input_values[0].to_string(), "D1_Ioff");
+
+    // Node 1 is the only row; B's entry there must be -1 (matching a real `I` source's own
+    // sign convention, since the diode's Norton current source is stamped by literally the
+    // same `stamp_current_source` function) so that u[0] = B[0][0] * Ioff = -Ioff.
+    assert_eq!(system.b[(0, 0)].to_string(), "-1");
+    assert_eq!(system.u[0].to_string(), "-1 * D1_Ioff");
+
+    let evaluated = system
+        .evaluate(&BTreeMap::from([
+            ("D1_G".to_string(), 2.0),
+            ("D1_Ioff".to_string(), 3.0),
+        ]))
+        .unwrap();
+    assert!((evaluated.a[(0, 0)] - 2.0).abs() < 1e-12);
+    assert!((evaluated.u[0] - (-3.0)).abs() < 1e-12);
 }
 
 #[test]

@@ -16,6 +16,25 @@ pub struct NumericMnaSystem {
     pub unknowns: Vec<String>,
     /// Input names.
     pub inputs: Vec<String>,
+    /// Source values in `inputs` order, evaluated the same way `a`/`k`/`b` are. Unlike
+    /// [`crate::MnaSystem::u`] (baked once, symbolically, at build time from each netlist
+    /// source's literal value), this is recomputed by every [`MnaSystem::evaluate`] call —
+    /// which matters for a source whose value genuinely changes between evaluations, such as
+    /// a piecewise-linear device's Norton-equivalent current (`{name}_Ioff`), rather than a
+    /// netlist-declared `V`/`I` source whose value never changes after parsing.
+    ///
+    /// Evaluating an input's value is best-effort, not required: a source whose symbol has no
+    /// entry in `values` (e.g. a duty ratio or `Vin` a caller only cares about symbolically,
+    /// while evaluating unrelated structural matrices) gets `f64::NAN` here rather than
+    /// failing the whole [`MnaSystem::evaluate`] call, matching this method's existing
+    /// behavior for `a`/`k`/`b` requiring only the symbols the caller actually supplied. `u`
+    /// below treats a `NAN` input as contributing `0.0`, not `NAN`, to every row.
+    pub input_values: Vec<f64>,
+    /// The expanded right-hand side `B * input_values`, in unknown order — the numeric twin
+    /// of [`crate::MnaSystem::u`], computed fresh from `input_values` above rather than from
+    /// the netlist's original (possibly stale) literal values. Rows depending only on inputs
+    /// that evaluated successfully are exact; see `input_values` above for the unresolved case.
+    pub u: Vec<f64>,
 }
 
 /// Explicit state-space system `dot(x) = A*x + B*u`.
@@ -48,12 +67,30 @@ impl MnaSystem {
         }
         environment.extend(values.iter().map(|(name, value)| (name.clone(), *value)));
 
+        let b = evaluate_matrix(&self.b, &environment)?;
+        let input_values: Vec<f64> = self
+            .input_values
+            .iter()
+            .map(|expression| expression.evaluate(&environment).unwrap_or(f64::NAN))
+            .collect();
+        let order = self.unknowns.len();
+        let mut u = vec![0.0; order];
+        for row in 0..order {
+            for (column, input_value) in input_values.iter().enumerate() {
+                if !input_value.is_nan() {
+                    u[row] += b[(row, column)] * input_value;
+                }
+            }
+        }
+
         Ok(NumericMnaSystem {
             a: evaluate_matrix(&self.a, &environment)?,
             k: evaluate_matrix(&self.k, &environment)?,
-            b: evaluate_matrix(&self.b, &environment)?,
+            b,
             unknowns: self.unknowns.clone(),
             inputs: self.inputs.clone(),
+            input_values,
+            u,
         })
     }
 }
@@ -274,7 +311,7 @@ pub enum StateSpaceError {
 }
 
 impl StateSpaceError {
-    fn singular_algebraic(unknowns: &[String], indices: &[usize], pivot: usize) -> Self {
+    pub(crate) fn singular_algebraic(unknowns: &[String], indices: &[usize], pivot: usize) -> Self {
         Self::SingularAlgebraicBlock {
             unknown: unknowns[indices[pivot]].clone(),
             block: indices
@@ -284,7 +321,7 @@ impl StateSpaceError {
         }
     }
 
-    fn singular_storage(unknowns: &[String], indices: &[usize], pivot: usize) -> Self {
+    pub(crate) fn singular_storage(unknowns: &[String], indices: &[usize], pivot: usize) -> Self {
         Self::SingularStorageBlock {
             unknown: unknowns[indices[pivot]].clone(),
             block: indices

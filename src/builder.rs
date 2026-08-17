@@ -162,6 +162,21 @@ impl MnaBuilder {
                 }
                 inputs.push(element.name.clone());
                 input_values.push(source_value(element)?);
+            } else if element.device_letter == 'D' {
+                // A piecewise-linear (or otherwise externally companion-modeled) diode is
+                // stamped as a conductance (see the 'D' arm below) plus a Norton current
+                // source of value `{name}_Ioff`. Both are per-instance symbolic parameters —
+                // not parsed from the netlist, since which segment (and therefore which
+                // numeric G/Ioff) is active is decided per timestep by the caller's own
+                // piecewise-linear mode-selection, not by this crate. See `elspice-pwl`'s
+                // `docs/architecture.md` for why this is the right split of responsibility.
+                let column = inputs.len();
+                let key = normalize(&element.name);
+                if input_by_element.insert(key, column).is_some() {
+                    return Err(BuildError::DuplicateElement(element.name.clone()));
+                }
+                inputs.push(element.name.clone());
+                input_values.push(Expression::symbol(format!("{}_Ioff", element.name)));
             }
         }
 
@@ -211,6 +226,16 @@ impl MnaBuilder {
                 'F' => stamp_cccs(&mut a, &index, element)?,
                 'H' => stamp_ccvs(&mut a, &index, element)?,
                 'K' => stamp_mutual_inductance(&mut k, &index, element, &inductances)?,
+                'D' => {
+                    let conductance = Expression::symbol(format!("{}_G", element.name));
+                    stamp_admittance(&mut a, &index, element, conductance)?;
+                    stamp_current_source(
+                        &mut b,
+                        &index,
+                        element,
+                        input_by_element[&normalize(&element.name)],
+                    )?;
+                }
                 _ => self.unsupported(element, &mut warnings)?,
             }
         }
