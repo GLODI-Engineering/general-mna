@@ -21,6 +21,12 @@ modified or imported by this repository.
 
 - Symbolic stamps for `R`, `C`, `L`, `V`, `I`, `G` (VCCS), `E` (VCVS), `F`
   (CCCS), and `H` (CCVS).
+- Time-varying `V`/`I` sources — `SIN`/`PULSE`/`EXP`/`PWL`/`SFFM`, the same five forms common to
+  both ngspice and Xyce (see `spice-lsp/docs/GRAMMAR.md`). This crate has no notion of "now": a
+  source using one of these is stamped as a per-instance symbol (`Expression::symbol(name)`,
+  the same pattern diode Norton currents already use below) rather than a baked literal, and
+  `MnaSystem::transient_sources` exposes the parsed `TransientFunction` for the caller to
+  evaluate at its own current `t` and supply via `evaluate()`'s `values` map every step.
 - `D` (diode) as a companion-model conductance plus a Norton current source,
   both left as per-instance symbolic parameters (`{name}_G`, `{name}_Ioff`)
   rather than parsed from the netlist — this crate has no diode physics of

@@ -231,3 +231,50 @@ fn parameter_defaults_and_numeric_lookup_are_case_insensitive() {
     let evaluated = numeric(&system, &[]);
     assert!((evaluated.a[(0, 0)] - 0.0005).abs() < 1e-15);
 }
+
+#[test]
+fn sin_source_is_stamped_as_a_symbol_not_a_baked_literal() {
+    let system = MnaBuilder::new(Dialect::Ngspice)
+        .build_fragment("V1 1 0 SIN(0 10 1000 0 0 0)\nR1 1 0 1k")
+        .unwrap();
+
+    assert_eq!(system.inputs, ["V1"]);
+    // A transient-function source is a symbol referencing its own element name -- not a
+    // baked-in literal -- exactly like a PWL diode's `{name}_Ioff` above, so the caller can
+    // supply a different numeric value every step.
+    assert_eq!(system.input_values[0].to_string(), "V1");
+    assert_eq!(system.transient_sources.len(), 1);
+    let sin = &system.transient_sources["V1"];
+    // Quarter period of a 1000Hz sine starting at 0: t=250us -> value = 10.
+    assert!((sin.value_at(2.5e-4) - 10.0).abs() < 1e-6);
+
+    // V1's own KVL row is "I(V1)" (a voltage source's B column is stamped on its own branch
+    // row, not directly on a node row -- see `stamp_voltage_source`), not row 0.
+    let branch_row = index(&system, "I(V1)");
+
+    // Without the caller supplying "V1" in `values`, u is 0 there (documented NAN-as-zero
+    // fallback for a symbol the caller didn't provide).
+    let evaluated_missing = system.evaluate(&BTreeMap::new()).unwrap();
+    assert_eq!(evaluated_missing.u[branch_row], 0.0);
+
+    // With the caller supplying the transient function's own value at some t, u reflects it
+    // exactly -- this is the whole point: the same MnaSystem, evaluated with different
+    // caller-supplied "V1" values, reproduces different circuit states as if V1 varies with
+    // time, without elspice-mna itself knowing anything about "time."
+    let evaluated_at_quarter_period = system
+        .evaluate(&BTreeMap::from([("V1".to_string(), sin.value_at(2.5e-4))]))
+        .unwrap();
+    assert!((evaluated_at_quarter_period.u[branch_row] - 10.0).abs() < 1e-9);
+}
+
+#[test]
+fn plain_dc_source_is_unaffected_by_transient_source_support() {
+    // A source with no transient function must keep the exact existing behavior: a baked
+    // literal, and an empty transient_sources map -- confirms adding SIN/PULSE/EXP/PWL/SFFM
+    // support didn't change anything for the (overwhelmingly common) static-value case.
+    let system = MnaBuilder::new(Dialect::Ngspice)
+        .build_fragment("V1 1 0 DC 10\nR1 1 0 1k")
+        .unwrap();
+    assert_eq!(system.input_values[0].to_string(), "10");
+    assert!(system.transient_sources.is_empty());
+}

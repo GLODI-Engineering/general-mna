@@ -4,7 +4,7 @@ use std::fmt;
 use spice_core::ast::{ElementInstance, Statement};
 use spice_core::{lexer, parser, Dialect};
 
-use crate::{Expression, Matrix, MnaSystem};
+use crate::{Expression, Matrix, MnaSystem, TransientFunction};
 
 /// Treatment of parsed devices for which this linear MNA crate has no stamp.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -153,6 +153,7 @@ impl MnaBuilder {
         let mut inputs = Vec::new();
         let mut input_values = Vec::new();
         let mut input_by_element = HashMap::new();
+        let mut transient_sources = BTreeMap::new();
         for element in &elements {
             if matches!(element.device_letter, 'V' | 'I') {
                 let column = inputs.len();
@@ -161,7 +162,17 @@ impl MnaBuilder {
                     return Err(BuildError::DuplicateElement(element.name.clone()));
                 }
                 inputs.push(element.name.clone());
-                input_values.push(source_value(element)?);
+                if let Some(transient_fn) = TransientFunction::parse(&element.raw_params) {
+                    // A time-varying source is stamped as a named symbol, not a baked
+                    // literal, exactly like a PWL diode's own `{name}_Ioff` just below --
+                    // the caller supplies its numeric value fresh at every step via
+                    // `evaluate`'s `values` map, using `transient_sources` to know it needs
+                    // to (see this type's own doc comment for the full contract).
+                    transient_sources.insert(element.name.clone(), transient_fn);
+                    input_values.push(Expression::symbol(element.name.clone()));
+                } else {
+                    input_values.push(source_value(element)?);
+                }
             } else if element.device_letter == 'D' {
                 // A piecewise-linear (or otherwise externally companion-modeled) diode is
                 // stamped as a conductance (see the 'D' arm below) plus a Norton current
@@ -270,6 +281,7 @@ impl MnaBuilder {
             unknowns: index.names,
             inputs,
             input_values,
+            transient_sources,
             parameter_defaults,
             warnings,
         })

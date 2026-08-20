@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use crate::{Expression, Matrix};
+use crate::{Expression, Matrix, TransientFunction};
 
 /// A symbolic MNA descriptor system.
 #[derive(Debug, Clone, PartialEq)]
@@ -19,6 +19,14 @@ pub struct MnaSystem {
     pub inputs: Vec<String>,
     /// Source values in `inputs` order.
     pub input_values: Vec<Expression>,
+    /// Every `V`/`I` source declared with a `SIN`/`PULSE`/`EXP`/`PWL`/`SFFM` transient
+    /// function, keyed by source name — such a source's own `input_values` entry is
+    /// `Expression::symbol(name)` (not a baked literal), so the caller must supply
+    /// `values.insert(name, transient_sources[name].value_at(t))` before every
+    /// [`MnaSystem::evaluate`] call, exactly the way a PWL diode's `{name}_Ioff` symbol
+    /// already has to be supplied per step — see `transient_source`'s own module doc comment.
+    /// Empty for a netlist with no such sources (every existing caller is unaffected).
+    pub transient_sources: BTreeMap<String, TransientFunction>,
     /// Defaults collected from `.param` statements.
     pub parameter_defaults: BTreeMap<String, Expression>,
     /// Non-fatal build messages, primarily for deliberately ignored elements.

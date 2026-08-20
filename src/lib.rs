@@ -17,7 +17,9 @@ mod builder;
 mod expression;
 mod matrix;
 mod numeric;
+mod symbolic;
 mod system;
+mod transient_source;
 
 #[cfg(feature = "python")]
 mod python;
@@ -27,4 +29,8 @@ pub use builder::{BuildError, BuildOptions, MnaBuilder, SwitchState, Unsupported
 pub use expression::{EvaluationError, Expression};
 pub use matrix::Matrix;
 pub use numeric::{NumericMnaSystem, NumericStateSpace, StateSpaceError};
+pub use symbolic::{
+    faddeev_leverrier, SymbolicStateSpace, SymbolicTransferFunction, TransferFunctionError,
+};
 pub use system::{MnaSystem, StringMnaSystem};
+pub use transient_source::{PwlPoints, TransientFunction};

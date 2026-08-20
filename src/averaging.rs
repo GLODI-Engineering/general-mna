@@ -33,9 +33,11 @@ pub fn average(phases: &[WeightedPhase<'_>]) -> Result<MnaSystem, AveragingError
     }
 
     let mut parameter_defaults = BTreeMap::new();
+    let mut transient_sources = BTreeMap::new();
     let mut warnings = Vec::new();
     for (phase_index, phase) in phases.iter().enumerate() {
         parameter_defaults.extend(phase.system.parameter_defaults.clone());
+        transient_sources.extend(phase.system.transient_sources.clone());
         warnings.extend(
             phase
                 .system
@@ -53,6 +55,7 @@ pub fn average(phases: &[WeightedPhase<'_>]) -> Result<MnaSystem, AveragingError
         unknowns: first.unknowns.clone(),
         inputs: first.inputs.clone(),
         input_values: first.input_values.clone(),
+        transient_sources,
         parameter_defaults,
         warnings,
     })
