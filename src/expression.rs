@@ -309,7 +309,7 @@ fn is_simple_symbol(value: &str) -> bool {
         && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '$' | '.'))
 }
 
-fn parse_spice_number(raw: &str) -> Option<f64> {
+pub(crate) fn parse_spice_number(raw: &str) -> Option<f64> {
     if let Ok(value) = raw.parse::<f64>() {
         return Some(value);
     }

@@ -223,14 +223,14 @@ impl TransientFunction {
         let mut args: Vec<f64> = Vec::new();
         let first_rest = first[paren + 1..].trim_end_matches(')');
         if !first_rest.is_empty() {
-            args.push(first_rest.parse().ok()?);
+            args.push(crate::expression::parse_spice_number(first_rest)?);
         }
         for token in &tokens[1..] {
             let cleaned = token.trim_end_matches(')');
             if cleaned.is_empty() {
                 continue;
             }
-            args.push(cleaned.parse().ok()?);
+            args.push(crate::expression::parse_spice_number(cleaned)?);
         }
 
         match name.as_str() {
@@ -369,5 +369,45 @@ mod tests {
     fn non_function_tokens_return_none() {
         assert!(TransientFunction::parse(&toks("10")).is_none());
         assert!(TransientFunction::parse(&toks("DC 5")).is_none());
+    }
+
+    #[test]
+    fn pulse_accepts_spice_numeric_suffixes() {
+        // Same shape as pulse_matches_hand_computed_trapezoid, but with realistic
+        // SPICE-suffixed arguments (TD=1m, TR=100n, TF=100n, PW=2m, PER=4m) -- this is
+        // the exact case that silently failed to parse before parse() switched from
+        // plain f64::parse to crate::expression::parse_spice_number.
+        let tf = TransientFunction::parse(&toks("PULSE(0 5 1m 100n 100n 2m 4m)")).unwrap();
+        match tf {
+            TransientFunction::Pulse {
+                v1,
+                v2,
+                td,
+                tr,
+                tf: fall,
+                pw,
+                per,
+            } => {
+                assert_eq!(v1, 0.0);
+                assert_eq!(v2, 5.0);
+                assert!((td - 1e-3).abs() < 1e-15);
+                assert!((tr - 100e-9).abs() < 1e-15);
+                assert!((fall - 100e-9).abs() < 1e-15);
+                assert!((pw - 2e-3).abs() < 1e-15);
+                assert!((per - 4e-3).abs() < 1e-15);
+            }
+            other => panic!("expected Pulse, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sin_accepts_spice_numeric_suffixes() {
+        let tf = TransientFunction::parse(&toks("SIN(0 10 50k 0 0 0)")).unwrap();
+        match tf {
+            TransientFunction::Sin { freq, .. } => {
+                assert!((freq - 50e3).abs() < 1e-9);
+            }
+            other => panic!("expected Sin, got {other:?}"),
+        }
     }
 }
