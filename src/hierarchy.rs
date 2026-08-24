@@ -7,13 +7,28 @@
 //! `.subckt` bodies may contain block/signal-domain statements too (nothing about
 //! `general-spice-core`'s grammar restricts them to electrical elements — a `.subckt` is just a
 //! named, reusable *group* of statements) — an instance's internal block graph is expanded and
-//! dotted-path-renamed exactly like its electrical elements are. **Not yet supported** (a real,
-//! deliberate scope cut for this first pass, not an oversight): binding an *external* signal
-//! into a subckt instance's own internal block graph — every block reference inside a `.subckt`
-//! body must resolve entirely within that body (via internal block names) or through the
-//! instance's electrical ports; there is no signal-domain port yet, only electrical ones. A
-//! block referencing an undefined name still surfaces as the same `UnknownBlockInput` error it
-//! always has, just after expansion instead of before.
+//! dotted-path-renamed exactly like its electrical elements are.
+//!
+//! **Signal-domain ports**: a `.subckt`'s declared port list (`Subckt::nodes`) is just names,
+//! positionally bound at the `X`-call site — nothing in it is electrical-specific. The same
+//! `port_map` substitution [`expand_body`] already applies to every electrical node also applies,
+//! unchanged, to a [`BlockInstance`]'s own name and every signal-reference field it carries — so
+//! declaring an extra "port" purely to carry a signal binding, with no electrical meaning at all,
+//! already works with zero extra machinery:
+//!
+//! - **Signal in**: `.subckt reg vin vout ctrl` with an internal block field `in=ctrl` — calling
+//!   `X1 vsrc vload EXT_DUTY reg` binds `ctrl` to `EXT_DUTY`, so the internal block reads
+//!   whatever `EXT_DUTY` (a block declared outside the subckt, at whatever scope `X1` itself is
+//!   called from) produces.
+//! - **Signal out**: an internal block whose own `.name` *is* the declared port name (e.g. a
+//!   `kind=probe` block literally named `reading` inside `.subckt sensor vin vout reading`)
+//!   becomes addressable from outside under whatever name the caller bound that port to (`X1 a b
+//!   MEASURED sensor` exposes it as `MEASURED`) — symmetric with how an internal node named the
+//!   same as an electrical port is externally addressable through the caller's own binding.
+//!
+//! A block reference that resolves to a name nothing declares (not a port, not another block in
+//! the same body) still surfaces as the same `UnknownBlockInput` error it always has, just after
+//! expansion instead of before.
 
 use std::collections::HashMap;
 
@@ -446,5 +461,101 @@ mod tests {
         assert_eq!(modu.name, "X1.MOD");
         let in_field = modu.fields.iter().find(|(k, _)| k == "in").unwrap();
         assert_eq!(in_field.1, "X1.DUTY");
+    }
+
+    #[test]
+    fn a_signal_can_be_bound_into_a_subckt_instance_from_outside_via_a_declared_port() {
+        // A .subckt's port list isn't electrical-only -- it's just names, positionally bound at
+        // the call site. Declaring an extra "port" purely to carry a signal name in/out lets an
+        // external block feed a subckt instance's internal block graph (or vice versa), the same
+        // uniform dotted-path resolution used for electrical nodes.
+        use general_spice_core::ast::BlockInstance;
+
+        let statements = vec![
+            Statement::BlockInstance(BlockInstance {
+                name: "EXT_DUTY".to_string(),
+                fields: vec![("kind".to_string(), "const".to_string())],
+                span: 1..2,
+            }),
+            subckt("reg", &["vin", "vout", "ctrl"]),
+            Statement::BlockInstance(BlockInstance {
+                name: "MOD".to_string(),
+                fields: vec![
+                    ("kind".to_string(), "pwm".to_string()),
+                    ("in".to_string(), "ctrl".to_string()),
+                ],
+                span: 1..2,
+            }),
+            ends("reg"),
+            x_call("X1", &["vsrc", "vload", "EXT_DUTY"], "reg"),
+        ];
+        let flat = flatten(&statements).unwrap();
+        assert_eq!(flat.len(), 2);
+        let Statement::BlockInstance(ext_duty) = &flat[0] else {
+            unreachable!()
+        };
+        assert_eq!(ext_duty.name, "EXT_DUTY");
+        let Statement::BlockInstance(modu) = &flat[1] else {
+            unreachable!()
+        };
+        assert_eq!(modu.name, "X1.MOD");
+        // "ctrl" is a declared port bound to "EXT_DUTY" at the call site -- it must resolve to
+        // the real external block's own (unprefixed, since it's declared at the true root) name,
+        // not "X1.ctrl" or "X1.EXT_DUTY".
+        let in_field = modu.fields.iter().find(|(k, _)| k == "in").unwrap();
+        assert_eq!(in_field.1, "EXT_DUTY");
+    }
+
+    #[test]
+    fn a_subckt_instance_can_expose_an_internal_block_as_a_signal_output_port() {
+        // The reverse direction: an internal block's own output reaching outside the instance
+        // through a declared port, so an external block can read it as an ordinary
+        // Signal::Block(name) reference.
+        use general_spice_core::ast::BlockInstance;
+
+        let statements = vec![
+            subckt("sensor", &["vin", "vout", "reading"]),
+            element('R', "R1", &["vin", "vout"]),
+            Statement::BlockInstance(BlockInstance {
+                name: "reading".to_string(),
+                fields: vec![
+                    ("kind".to_string(), "probe".to_string()),
+                    ("node".to_string(), "vout".to_string()),
+                ],
+                span: 1..2,
+            }),
+            ends("sensor"),
+            x_call("X1", &["a", "b", "MEASURED"], "sensor"),
+            Statement::BlockInstance(BlockInstance {
+                name: "GAIN1".to_string(),
+                fields: vec![
+                    ("kind".to_string(), "gain".to_string()),
+                    ("in".to_string(), "MEASURED".to_string()),
+                ],
+                span: 1..2,
+            }),
+        ];
+        let flat = flatten(&statements).unwrap();
+        let sensor_block = flat
+            .iter()
+            .find_map(|s| match s {
+                Statement::BlockInstance(bi)
+                    if bi.fields.iter().any(|(k, v)| k == "kind" && v == "probe") =>
+                {
+                    Some(bi)
+                }
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(sensor_block.name, "MEASURED");
+        let gain_block = flat
+            .iter()
+            .find_map(|s| match s {
+                Statement::BlockInstance(bi) if bi.name == "GAIN1" => Some(bi),
+                _ => None,
+            })
+            .unwrap();
+        let in_field = gain_block.fields.iter().find(|(k, _)| k == "in").unwrap();
+        assert_eq!(in_field.1, "MEASURED");
     }
 }
