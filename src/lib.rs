@@ -1,6 +1,6 @@
 //! Modified nodal analysis (MNA) for educational circuit tools.
 //!
-//! The crate consumes the dialect-neutral AST from `spice-core` and builds
+//! The crate consumes the dialect-neutral AST from `general-spice-core` and builds
 //! the descriptor equation
 //!
 //! ```text
@@ -13,12 +13,14 @@
 //! SymPy, JavaScript, and PDF layers can preserve component names.
 
 mod averaging;
+pub mod block_graph;
 mod builder;
 mod expression;
 mod matrix;
 mod numeric;
 mod symbolic;
 mod system;
+mod system_builder;
 mod transient_source;
 
 #[cfg(feature = "python")]
@@ -33,4 +35,5 @@ pub use symbolic::{
     faddeev_leverrier, SymbolicStateSpace, SymbolicTransferFunction, TransferFunctionError,
 };
 pub use system::{MnaSystem, StringMnaSystem};
+pub use system_builder::{build_system, System};
 pub use transient_source::{PwlPoints, TransientFunction};

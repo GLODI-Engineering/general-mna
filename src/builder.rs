@@ -56,7 +56,7 @@ impl BuildOptions {
     }
 }
 
-/// Builds MNA systems from `spice-core` statements or netlist text.
+/// Builds MNA systems from `general-spice-core` statements or netlist text.
 #[derive(Debug, Clone)]
 pub struct MnaBuilder {
     dialect: Dialect,
@@ -266,7 +266,7 @@ impl MnaBuilder {
                         parameter_defaults.insert(name.clone(), value);
                     } else {
                         warnings.push(format!(
-                            "parameter '{name}' has an expression that is preserved by spice-core but is not a scalar MNA value"
+                            "parameter '{name}' has an expression that is preserved by general-spice-core but is not a scalar MNA value"
                         ));
                     }
                 }
@@ -624,7 +624,7 @@ fn is_ground(value: &str) -> bool {
 /// Error returned while parsing or stamping a netlist.
 #[derive(Debug, Clone, PartialEq)]
 pub enum BuildError {
-    /// `spice-core` rejected a statement.
+    /// `general-spice-core` rejected a statement.
     Parse {
         /// Parser message.
         message: String,

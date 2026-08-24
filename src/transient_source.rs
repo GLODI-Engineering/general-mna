@@ -1,9 +1,9 @@
 //! Time-varying independent-source functions: `SIN`, `PULSE`, `EXP`, `PWL`, `SFFM` — the same
-//! five transient-function forms `spice-core`'s own grammar reference documents as common to
+//! five transient-function forms `general-spice-core`'s own grammar reference documents as common to
 //! both ngspice and Xyce (`docs/GRAMMAR.md` in that repo, "same names/arg order in both, minor
 //! default-value wording differences"), same argument order.
 //!
-//! `spice-core` tokenizes a `V`/`I` element's parameters purely lexically (whitespace-split,
+//! `general-spice-core` tokenizes a `V`/`I` element's parameters purely lexically (whitespace-split,
 //! parentheses left attached to whichever token they landed on — confirmed directly this
 //! session, not assumed): `SIN(0 10 1000)` arrives as `["SIN(0", "10", "1000)"]`, three plain
 //! string tokens, with no notion that they form one function call. This module owns turning
@@ -209,7 +209,7 @@ impl TransientFunction {
     }
 
     /// Detects and parses one of the five transient-function forms from an already-tokenized
-    /// parameter list (as `spice-core` hands back — see the module doc comment for exactly how
+    /// parameter list (as `general-spice-core` hands back — see the module doc comment for exactly how
     /// mangled that tokenization is: parentheses stuck to whichever token they landed on).
     /// Returns `None` if `tokens` doesn't start with a recognized function name, so the caller
     /// can fall back to treating the source as an ordinary static value.

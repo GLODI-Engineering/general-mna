@@ -23,3 +23,5 @@ python = ["dep:pyo3"]
 [dependencies]
 pyo3 = { version = "0.27", features = ["extension-module"], optional = true }
 general-spice-core = { path = "../spice-lsp/servers/core" }
+continuous-blocks = { path = "../general-simulator/crates/continuous-blocks" }
+pwl-devices = { path = "../general-simulator/crates/pwl-devices" }
