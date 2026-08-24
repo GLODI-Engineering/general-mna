@@ -1,9 +1,9 @@
 use std::collections::BTreeMap;
 
-use elspice_mna::{Matrix, MnaBuilder};
-use spice_core::Dialect;
+use general_mna::{Matrix, MnaBuilder};
+use general_spice_core::Dialect;
 
-fn build(netlist: &str) -> elspice_mna::MnaSystem {
+fn build(netlist: &str) -> general_mna::MnaSystem {
     MnaBuilder::new(Dialect::Ngspice)
         .build_fragment(netlist)
         .unwrap()
@@ -191,7 +191,7 @@ impl NumericFaddeevLeverrier {
 }
 
 /// Independent, from-scratch numeric Faddeev-LeVerrier recursion (plain
-/// `f64`, no shared code with `elspice_mna::faddeev_leverrier`) used only to
+/// `f64`, no shared code with `general_mna::faddeev_leverrier`) used only to
 /// cross-check the symbolic recursion in tests.
 fn numeric_faddeev_leverrier(a: &Matrix<f64>) -> NumericFaddeevLeverrier {
     let n = a.rows();

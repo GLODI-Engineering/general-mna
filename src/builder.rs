@@ -1,8 +1,8 @@
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 
-use spice_core::ast::{ElementInstance, Statement};
-use spice_core::{lexer, parser, Dialect};
+use general_spice_core::ast::{ElementInstance, Statement};
+use general_spice_core::{lexer, parser, Dialect};
 
 use crate::{Expression, Matrix, MnaSystem, TransientFunction};
 

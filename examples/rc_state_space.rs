@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
-use elspice_mna::MnaBuilder;
-use spice_core::Dialect;
+use general_mna::MnaBuilder;
+use general_spice_core::Dialect;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let netlist = "V1 in 0 1\nR1 in out R\nC1 out 0 C";

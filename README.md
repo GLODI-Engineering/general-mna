@@ -1,6 +1,6 @@
-# elspice-mna
+# general-mna
 
-`elspice-mna` is an educational Rust library that converts a SPICE netlist
+`general-mna` is an educational Rust library that converts a SPICE netlist
 into the modified nodal analysis (MNA) descriptor equation
 
 ```text
@@ -9,7 +9,7 @@ A x(t) + K dx(t)/dt = B u(t)
 
 It deliberately separates three jobs:
 
-1. [`spice-core`](../spice-lsp/servers/core) parses ngspice or Xyce text.
+1. [`general-spice-core`](../spice-lsp/servers/core) parses ngspice or Xyce text.
 2. This crate constructs symbolic MNA matrices and converter phase models.
 3. A thin Python/PyO3 or JavaScript/WASM package can render PDFs, hand the
    expressions to SymPy, or drive an interactive state-space application.
@@ -71,8 +71,8 @@ to every row of `u`.
 
 ```rust
 use std::collections::BTreeMap;
-use elspice_mna::MnaBuilder;
-use spice_core::Dialect;
+use general_mna::MnaBuilder;
+use general_spice_core::Dialect;
 
 let netlist = "V1 in 0 1\nR1 in out R\nC1 out 0 C";
 let mna = MnaBuilder::new(Dialect::Ngspice).build_fragment(netlist)?;
@@ -102,10 +102,10 @@ a mandatory title line.
 Build each topology from the same parsed netlist and override switch names:
 
 ```rust
-use elspice_mna::{
+use general_mna::{
     average, BuildOptions, Expression, MnaBuilder, SwitchState, WeightedPhase,
 };
-use spice_core::Dialect;
+use general_spice_core::Dialect;
 
 let netlist = "V1 in 0 Vin\nS1 in sw ctrl 0 ideal\nL1 sw out L\nC1 out 0 C\nR1 out 0 R";
 
@@ -196,10 +196,10 @@ The parser dependency is currently a sibling path so local parser work is used
 immediately without editing either repository:
 
 ```toml
-spice-core = { path = "../spice-lsp/servers/core" }
+general-spice-core = { path = "../spice-lsp/servers/core" }
 ```
 
-Once `spice-core` has a published version or stable Git tag, replace the path
+Once `general-spice-core` has a published version or stable Git tag, replace the path
 with that immutable dependency for portable builds.
 
 Quality gates:

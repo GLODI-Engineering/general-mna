@@ -1,15 +1,15 @@
 use std::collections::BTreeMap;
 
-use elspice_mna::{
+use general_mna::{
     average, BuildError, BuildOptions, Expression, MnaBuilder, StateSpaceError, SwitchState,
     WeightedPhase,
 };
-use spice_core::Dialect;
+use general_spice_core::Dialect;
 
 fn numeric(
-    system: &elspice_mna::MnaSystem,
+    system: &general_mna::MnaSystem,
     values: &[(&str, f64)],
-) -> elspice_mna::NumericMnaSystem {
+) -> general_mna::NumericMnaSystem {
     let values = values
         .iter()
         .map(|(name, value)| ((*name).to_string(), *value))
@@ -17,7 +17,7 @@ fn numeric(
     system.evaluate(&values).unwrap()
 }
 
-fn index(system: &elspice_mna::MnaSystem, name: &str) -> usize {
+fn index(system: &general_mna::MnaSystem, name: &str) -> usize {
     system
         .unknowns
         .iter()

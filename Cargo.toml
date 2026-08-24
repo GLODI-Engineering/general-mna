@@ -1,13 +1,19 @@
 [package]
-name = "elspice-mna"
+name = "general-mna"
 version = "0.1.0"
 edition = "2021"
-description = "Educational modified nodal analysis and converter averaging built on spice-core"
+description = "Educational modified nodal analysis and converter averaging built on general-spice-core"
 license = "AGPL-3.0-or-later"
+repository = "https://github.com/Elvis-codeur/general-mna"
+homepage = "https://github.com/Elvis-codeur/general-mna"
+documentation = "https://docs.rs/general-mna"
+readme = "README.md"
+keywords = ["spice", "circuit-simulation", "mna", "electronics"]
+categories = ["science", "simulation"]
 publish = false
 
 [lib]
-name = "elspice_mna"
+name = "general_mna"
 crate-type = ["rlib", "cdylib"]
 
 [features]
@@ -16,4 +22,4 @@ python = ["dep:pyo3"]
 
 [dependencies]
 pyo3 = { version = "0.27", features = ["extension-module"], optional = true }
-spice-core = { path = "../spice-lsp/servers/core" }
+general-spice-core = { path = "../spice-lsp/servers/core" }

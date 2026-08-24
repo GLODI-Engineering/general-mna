@@ -1,9 +1,9 @@
 use std::collections::{BTreeMap, HashMap};
 
+use general_spice_core::Dialect;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyModule};
-use spice_core::Dialect;
 
 use crate::{BuildOptions, Expression, MnaBuilder, MnaSystem, SwitchState};
 
