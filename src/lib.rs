@@ -16,6 +16,7 @@ mod averaging;
 pub mod block_graph;
 mod builder;
 mod expression;
+mod hierarchy;
 mod matrix;
 mod numeric;
 mod symbolic;
@@ -35,5 +36,5 @@ pub use symbolic::{
     faddeev_leverrier, SymbolicStateSpace, SymbolicTransferFunction, TransferFunctionError,
 };
 pub use system::{MnaSystem, StringMnaSystem};
-pub use system_builder::{build_system, System};
+pub use system_builder::{build_system, parse_and_flatten, System};
 pub use transient_source::{PwlPoints, TransientFunction};

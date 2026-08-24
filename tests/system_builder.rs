@@ -104,11 +104,12 @@ fn old_star_disguised_lines_are_ignored_as_ordinary_comments() {
 
 #[test]
 fn a_block_declared_inside_a_subckt_body_still_parses_as_a_block_instance() {
-    // Confirms parsing (Statement::BlockInstance recognition) works regardless of subckt
-    // nesting -- subckt instantiation/flattening itself is unrelated to Phase 2 and untouched
-    // here (MnaBuilder's own X-element handling, whatever it is, is exercised separately).
-    let source = ".subckt reg vin vout\nMOD kind=const value=0.5\n.ends reg\n";
+    // Confirms a block statement nested inside a .subckt body is recognized and, per Phase 3's
+    // hierarchy::flatten, only reaches the built System once the subckt is actually instantiated
+    // (an X-call) -- an uninstantiated subckt definition contributes nothing on its own, exactly
+    // like an uninstantiated real SPICE subcircuit contributes no electrical elements either.
+    let source = ".subckt reg vin vout\nMOD kind=const value=0.5\n.ends reg\nX1 a b reg\n";
     let System { blocks, .. } = build_system(source, Dialect::Ngspice).unwrap();
     assert_eq!(blocks.len(), 1);
-    assert_eq!(blocks[0].name, "MOD");
+    assert_eq!(blocks[0].name, "X1.MOD");
 }
