@@ -233,6 +233,15 @@ fn mangle_block(
     resolve: &impl Fn(&str) -> String,
 ) -> BlockInstance {
     const SIGNAL_FIELDS: [&str; 5] = ["in", "inputs", "ctrl", "clamp_lo_in", "clamp_hi_in"];
+    // `kind=probe`'s own reference fields (`node=<electrical node>`, `branch=<element name>` --
+    // see `system_builder::build_kind`'s `"probe"` arm) name an *electrical* thing, not a
+    // signal, but still need the exact same dotted-path/port/ground resolution as an
+    // ElementInstance's own nodes -- a probe declared inside a .subckt body pointing at a
+    // purely-internal node (not one of the declared ports) would otherwise keep its unmangled
+    // name after flattening and silently fail to resolve (or, worse, accidentally match an
+    // unrelated same-named node elsewhere in the flattened circuit). Each is a single value,
+    // never comma-separated and never `prev:`-prefixed (that's a signal-domain convention only).
+    const ELECTRICAL_REF_FIELDS: [&str; 2] = ["node", "branch"];
 
     let mut mangled = bi.clone();
     mangled.name = resolve(&bi.name);
@@ -252,6 +261,8 @@ fn mangle_block(
                 })
                 .collect::<Vec<_>>()
                 .join(",");
+        } else if ELECTRICAL_REF_FIELDS.contains(&key.as_str()) {
+            *value = resolve(value);
         }
     }
     mangled
@@ -548,6 +559,15 @@ mod tests {
             })
             .unwrap();
         assert_eq!(sensor_block.name, "MEASURED");
+        // The probe's own `node=vout` field must resolve through the same port binding as an
+        // electrical node ("vout" is a declared port, bound to "b" at the call site) -- not be
+        // left as the literal, unmangled "vout".
+        let node_field = sensor_block
+            .fields
+            .iter()
+            .find(|(k, _)| k == "node")
+            .unwrap();
+        assert_eq!(node_field.1, "b");
         let gain_block = flat
             .iter()
             .find_map(|s| match s {
@@ -557,5 +577,61 @@ mod tests {
             .unwrap();
         let in_field = gain_block.fields.iter().find(|(k, _)| k == "in").unwrap();
         assert_eq!(in_field.1, "MEASURED");
+    }
+
+    #[test]
+    fn a_probe_inside_a_subckt_body_resolves_its_node_field_to_the_dotted_path_name() {
+        // Regression: a probe's `node=`/`branch=` fields reference an *electrical* thing, not a
+        // signal -- they must get the same dotted-path mangling as an ElementInstance's own
+        // nodes when the node is purely internal (not a declared port), or the probe silently
+        // keeps referencing the unmangled, undeclared name after flattening.
+        use general_spice_core::ast::BlockInstance;
+
+        let statements = vec![
+            subckt("leg", &["vin", "vout"]),
+            element('R', "R1", &["vin", "mid"]),
+            element('R', "R2", &["mid", "vout"]),
+            Statement::BlockInstance(BlockInstance {
+                name: "VMID".to_string(),
+                fields: vec![
+                    ("kind".to_string(), "probe".to_string()),
+                    ("node".to_string(), "mid".to_string()),
+                ],
+                span: 1..2,
+            }),
+            Statement::BlockInstance(BlockInstance {
+                name: "IR1".to_string(),
+                fields: vec![
+                    ("kind".to_string(), "probe".to_string()),
+                    ("branch".to_string(), "R1".to_string()),
+                ],
+                span: 1..2,
+            }),
+            ends("leg"),
+            x_call("X1", &["a", "b"], "leg"),
+        ];
+        let flat = flatten(&statements).unwrap();
+        let vmid = flat
+            .iter()
+            .find_map(|s| match s {
+                Statement::BlockInstance(bi) if bi.name == "X1.VMID" => Some(bi),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(
+            vmid.fields.iter().find(|(k, _)| k == "node").unwrap().1,
+            "X1.mid"
+        );
+        let ir1 = flat
+            .iter()
+            .find_map(|s| match s {
+                Statement::BlockInstance(bi) if bi.name == "X1.IR1" => Some(bi),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(
+            ir1.fields.iter().find(|(k, _)| k == "branch").unwrap().1,
+            "X1.R1"
+        );
     }
 }
