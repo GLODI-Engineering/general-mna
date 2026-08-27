@@ -372,6 +372,22 @@ pub enum BlockKind {
         sample_time: Option<f64>,
         xc_count: usize,
     },
+    /// A plain, stateless, positionally-called Python function — a genuinely separate contract
+    /// from [`BlockKind::PyBlock`] above (not a mode of it): no `start`, no persistent `state`,
+    /// no `t`/`dt` boilerplate, just `function` (a name inside `path`'s own `.py` file) called
+    /// with each declared `inputs=` entry as its own positional argument (`f(*inputs)`, never
+    /// bundled into one list), returning a single value or a tuple/list matching `output_names`.
+    /// The closest equivalent to a plain named-input/named-output function block in other
+    /// block-diagram tools. `output_names`/`sample_time` mean the same as `PyBlock`'s own (still
+    /// scalar-only outputs, still the same zero-order-hold convention) — there is no `xc_count`
+    /// here at all, since a purely stateless function has nothing for a continuous state to mean.
+    /// See `pyblock_ffi::PyFunctionInstance`'s own module doc comment for the full contract.
+    PyFunction {
+        path: std::path::PathBuf,
+        function: String,
+        output_names: Vec<String>,
+        sample_time: Option<f64>,
+    },
     /// One of the six Clarke/Park coordinate transforms (see
     /// [`continuous_blocks::CoordinateTransform`]) — the standard `abc`/`alpha-beta-0`/`d-q-0`
     /// change of basis used to regulate a three-phase quantity (grid-tied PFC, motor drive) with
@@ -549,6 +565,7 @@ pub fn block_kind_name(kind: &BlockKind) -> &'static str {
         BlockKind::Hysteresis(_) => "hysteresis",
         BlockKind::CScript { .. } => "cscript",
         BlockKind::PyBlock { .. } => "pyblock",
+        BlockKind::PyFunction { .. } => "pyfunc",
         BlockKind::CoordinateTransform { kind, .. } => kind.name(),
         BlockKind::Pmsm { .. } => "pmsm",
         BlockKind::Probe(_) => "probe",
