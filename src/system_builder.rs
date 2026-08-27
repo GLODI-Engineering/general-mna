@@ -677,12 +677,23 @@ fn build_kind(stmt: &general_spice_core::ast::BlockInstance) -> Result<Kind, Str
                 (None, Some(_)) => Some(1.0 / get("freq")?),
                 (None, None) => None,
             };
+            let xc_count = match fields.get("xc_count") {
+                Some(s) => s.parse::<usize>().map_err(|_| {
+                    format!(
+                        "line {}: device '{name}' field 'xc_count' is not a non-negative \
+                         integer",
+                        line_number + 1
+                    )
+                })?,
+                None => 0,
+            };
             Kind::Block(BlockInstance {
                 name: name.to_string(),
                 kind: BlockKind::CScript {
                     lib,
                     output_names,
                     sample_time,
+                    xc_count,
                 },
                 inputs,
             })

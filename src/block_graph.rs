@@ -254,10 +254,23 @@ pub enum BlockKind {
     /// the power stage's own (much finer, and possibly adaptive/irregular) step rate. `None`
     /// (the default) calls `cscript_output` every resolved circuit step instead, passing that
     /// step's own `dt` — the right choice for a block meant to behave continuously.
+    ///
+    /// `xc_count`, if nonzero, declares this block as owning that many continuous states the
+    /// *solver itself* numerically integrates (one independent RK4 per block, the same
+    /// convention every other dynamic `BlockKind` here uses), as opposed to a block hand-
+    /// integrating its own state inside `cscript_output` (still the right choice for a fixed-
+    /// rate discrete recursion, e.g. a bilinear-transform-derived filter — see `cscript_ffi`'s
+    /// own module doc comment, "The optional continuous-state (`xc`) contract," for exactly
+    /// which case this is for). `0` (the default) is the plain, single-function contract
+    /// unchanged from before this field existed: `lib` must export `cscript_start`/
+    /// `cscript_output`/(optionally) `cscript_free`/`cscript_clone`. Nonzero requires `lib` to
+    /// export `cscript_start`/`cscript_derivative`/`cscript_output_xc`/(optionally)
+    /// `cscript_free`/`cscript_clone` *instead of* `cscript_output`.
     CScript {
         lib: std::path::PathBuf,
         output_names: Vec<String>,
         sample_time: Option<f64>,
+        xc_count: usize,
     },
     /// One of the six Clarke/Park coordinate transforms (see
     /// [`continuous_blocks::CoordinateTransform`]) — the standard `abc`/`alpha-beta-0`/`d-q-0`
