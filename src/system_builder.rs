@@ -391,7 +391,8 @@ fn build_kind(stmt: &general_spice_core::ast::BlockInstance) -> Result<Kind, Str
             // Every gate is block-driven -- gate=block ctrl=<name>, reading that block's
             // current output (>= 0.5 means on). No other gate= spelling exists: a
             // permanently-off gate is an explicit `Const(0.0)` wired through
-            // `kind=sig2gate`, the same as any other gate.
+            // `kind=sig2voltage` (a MOSFET's gate is itself a voltage, the same Signal-to-PS
+            // boundary a V-source's own magnitude uses -- no dedicated gate-only converter).
             let gate = match fields.get("gate").map(String::as_str) {
                 Some("block") => GateBinding::Block(get_str("ctrl")?),
                 Some(other) => {
@@ -1006,11 +1007,6 @@ fn build_kind(stmt: &general_spice_core::ast::BlockInstance) -> Result<Kind, Str
                 inputs: Vec::new(),
             })
         }
-        "sig2gate" => Kind::Block(BlockInstance {
-            name: name.to_string(),
-            kind: BlockKind::Sig2Gate,
-            inputs: vec![parse_signal(&get_str("in")?)],
-        }),
         "sig2voltage" => Kind::Block(BlockInstance {
             name: name.to_string(),
             kind: BlockKind::Sig2Voltage,

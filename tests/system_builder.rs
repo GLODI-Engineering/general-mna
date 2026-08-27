@@ -62,7 +62,7 @@ fn a_mosfet_line_correlates_by_name_with_its_block_gate() {
     // sharing that name -- a real structural correlation-by-name, not a coincidence.
     let source = "V1 vin 0 400\nD1 vin vx mosfetmodel\nR1 vx 0 1000\n\
                   OFFVAL kind=const value=0\n\
-                  OFFGATE kind=sig2gate in=OFFVAL\n\
+                  OFFGATE kind=sig2voltage in=OFFVAL\n\
                   D1 kind=mosfet r_on=0.01 g_breakdown=0 v_breakdown=-1e6 g_off=1e-6 v_th=1e6 \
                   g_on=0 gate=block ctrl=OFFGATE\n";
     let System {

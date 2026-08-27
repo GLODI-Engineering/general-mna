@@ -433,30 +433,33 @@ pub enum BlockKind {
     /// canvas (a future UI enforcing the same rule visually is the intended companion, not a
     /// replacement for this).
     Probe(ProbeTarget),
-    /// The **Signal-to-PS** converter for a discrete physical actuation: the *only* legal
-    /// target for a [`GateBinding::Block`]'s own named block — `dae-runtime` rejects a
-    /// `GateBinding` naming anything else with `DaeError::GateTargetNotSig2Gate`. Purely an
-    /// identity pass-through numerically (`value =
-    /// input`); its entire purpose is marking, at the netlist level, exactly where a signal
-    /// stops being "just a number a controller computed" and starts being "a command that
-    /// actuates a physical switch" — the discrete-actuation counterpart to
-    /// [`BlockKind::Sig2Voltage`]/[`BlockKind::Sig2Current`]'s continuous case below. One input.
-    Sig2Gate,
     /// The **Signal-to-PS** converter for a continuous quantity, closing the write-direction
     /// gap [`BlockKind::Probe`] doesn't (a probe only ever reads): the *only* legal way a
-    /// signal-domain block's output drives an independent voltage source's own magnitude. A `V`
-    /// element's own literal value field in the netlist names this block directly (e.g. `V1 a 0
-    /// VDRV`, where `VDRV` is a declared `Sig2Voltage` block) — `general-mna`'s own
-    /// `Expression::parse_scalar` already accepts a bare symbol there with no change needed on
-    /// that side; `dae-runtime` requires, at validation time, that any such symbol naming a
-    /// declared block resolve to exactly this kind (see
+    /// signal-domain block's output drives an independent voltage source's own magnitude *or*
+    /// a MOSFET's gate. A `V` element's own literal value field in the netlist names this block
+    /// directly (e.g. `V1 a 0 VDRV`, where `VDRV` is a declared `Sig2Voltage` block) —
+    /// `general-mna`'s own `Expression::parse_scalar` already accepts a bare symbol there with
+    /// no change needed on that side; `dae-runtime` requires, at validation time, that any such
+    /// symbol naming a declared block resolve to exactly this kind (see
     /// `DaeError::SourceNotSig2PhysicalConverter`), and every step, substitutes this block's own
     /// just-computed output value into the circuit solve in that symbol's place — a real,
     /// bidirectional physical/control coupling `Signal::Measure`'s read-only predecessor could
     /// never express (see `elspice-pwl-buck-dc-motor-cascade`'s own README for the concrete gap
-    /// this closes: a block could observe a circuit's voltage but never load it). Purely an
-    /// identity pass-through numerically, same as [`BlockKind::Sig2Gate`]; the type-distinct
-    /// name is what the enforcement (and, later, a UI) keys on. One input.
+    /// this closes: a block could observe a circuit's voltage but never load it).
+    ///
+    /// Also the *only* legal target for a [`GateBinding::Block`]'s own named block —
+    /// `dae-runtime` rejects a `GateBinding` naming anything else with
+    /// `DaeError::GateTargetNotSig2Voltage`. A MOSFET's gate is itself a voltage (`V_GS`
+    /// against `v_th`), not a distinct discrete-actuation signal domain, so there is no
+    /// separate gate-only converter here — one type, `Sig2Voltage`, is the whole Signal-to-PS
+    /// boundary for "a signal-domain block's output drives a physical voltage," whether that
+    /// voltage happens to source a node or gate a switch. (An earlier design had a separate
+    /// `Sig2Gate` converter purely for marking discrete actuation; removed once the "gate is
+    /// just a voltage, no dedicated controller needed" framing made that distinction
+    /// unnecessary weight for every netlist author to carry.)
+    ///
+    /// Purely an identity pass-through numerically (`value = input`) in both roles; the
+    /// type-distinct name is what the enforcement (and, later, a UI) keys on. One input.
     Sig2Voltage,
     /// The [`BlockKind::Sig2Voltage`] counterpart for an `I` (independent current source)
     /// element's own literal value field. One input.
@@ -466,8 +469,8 @@ pub enum BlockKind {
 /// One named block instance and where its inputs (if any) come from.
 /// `Const`/`Pwc`/`Pwl`/`Waveform`/`Probe` blocks must have zero inputs; `Sum`/`Product` need one
 /// input per sign/factor; `Gain`/
-/// `StateSpace`/`TransferFunction`/`Vco`/`Saturation`/`Table`/`MathFn1`/`Sig2Gate`/
-/// `Sig2Voltage`/`Sig2Current` each need exactly one; `Pid` needs exactly one (the error signal)
+/// `StateSpace`/`TransferFunction`/`Vco`/`Saturation`/`Table`/`MathFn1`/`Sig2Voltage`/
+/// `Sig2Current` each need exactly one; `Pid` needs exactly one (the error signal)
 /// when its `clamp` is `PidClamp::Fixed`, or exactly three (`error, clamp_lo, clamp_hi`, in that
 /// order) when `PidClamp::Dynamic`; `MathFn2` needs two; `MathFn3` needs three;
 /// `CoordinateTransform` needs `kind.input_count()` (3 for `Clarke`/`ClarkeInv`, 4 for the
@@ -487,8 +490,8 @@ pub struct BlockInstance {
 
 /// How one MOSFET's gate state is resolved, every step: always from a named block's current
 /// output, on while it's `>= 0.5`. No non-block-driven variant exists — even a permanently-off
-/// gate is an explicit `Const(0.0)` wired through a [`BlockKind::Sig2Gate`], the same as every
-/// other gate — and no bare carrier-comparator variant exists either: that comparison now lives
+/// gate is an explicit `Const(0.0)` wired through a [`BlockKind::Sig2Voltage`], the same as
+/// every other gate — and no bare carrier-comparator variant exists either: that comparison now lives
 /// entirely inside gate-driving `BlockKind`s themselves ([`BlockKind::Pwm`]/
 /// [`BlockKind::PhaseShiftPwm`], or a hand-built chain of ordinary blocks), so `GateBinding` has
 /// exactly one job — reading a number and thresholding it — regardless of what produced that
@@ -510,8 +513,8 @@ impl GateBinding {
 
     /// # Panics
     /// If the named block's own current value is a `SignalValue::Vector` — unreachable in
-    /// practice, since the *only* legal `GateBinding` target is a `BlockKind::Sig2Gate`
-    /// converter (enforced before any step runs), and `Sig2Gate` itself rejects a `Vector`
+    /// practice, since the *only* legal `GateBinding` target is a `BlockKind::Sig2Voltage`
+    /// converter (enforced before any step runs), and `Sig2Voltage` itself rejects a `Vector`
     /// input at evaluation time — there is no way for a validly-targeted gate to ever see one
     /// here. Also panics if `name` isn't in `outputs` at all, exactly as before this variant
     /// existed (equally unreachable, for the same "checked before any step runs" reason).
@@ -519,7 +522,7 @@ impl GateBinding {
         let GateBinding::Block(name) = self;
         let value = outputs[name.as_str()].as_scalar().unwrap_or_else(|| {
             panic!(
-                "gate '{name}' resolved to a vector signal -- unreachable, since Sig2Gate \
+                "gate '{name}' resolved to a vector signal -- unreachable, since Sig2Voltage \
                  itself must already reject a vector input"
             )
         });
@@ -531,7 +534,7 @@ impl GateBinding {
     }
 }
 /// A short, human-readable name for a `BlockKind`, for error messages that need to say what a
-/// mistargeted block actually is (e.g. `DaeError::GateTargetNotSig2Gate`/
+/// mistargeted block actually is (e.g. `DaeError::GateTargetNotSig2Voltage`/
 /// `SourceNotSig2PhysicalConverter`) without dumping its full parameter set.
 pub fn block_kind_name(kind: &BlockKind) -> &'static str {
     match kind {
@@ -569,7 +572,6 @@ pub fn block_kind_name(kind: &BlockKind) -> &'static str {
         BlockKind::CoordinateTransform { kind, .. } => kind.name(),
         BlockKind::Pmsm { .. } => "pmsm",
         BlockKind::Probe(_) => "probe",
-        BlockKind::Sig2Gate => "sig2gate",
         BlockKind::Sig2Voltage => "sig2voltage",
         BlockKind::Sig2Current => "sig2current",
     }
