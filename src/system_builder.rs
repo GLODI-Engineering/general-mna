@@ -795,6 +795,52 @@ fn build_kind(stmt: &general_spice_core::ast::BlockInstance) -> Result<Kind, Str
                 inputs,
             })
         }
+        "pyblock" => {
+            // Same field set as "cscript" above (output_names/inputs/sample_time/xc_count
+            // parsing all identical), except `path=` names a `.py` source file instead of a
+            // precompiled `.so` -- see BlockKind::PyBlock's own doc comment.
+            let path = std::path::PathBuf::from(get_str("path")?);
+            let output_names = match fields.get("outputs") {
+                Some(names) => names.split(',').map(str::to_string).collect(),
+                None => vec![name.to_string()],
+            };
+            let inputs = match fields.get("inputs") {
+                Some(list) => list.split(',').map(parse_signal).collect(),
+                None => vec![parse_signal(&get_str("in")?)],
+            };
+            let sample_time = match (fields.get("ts"), fields.get("freq")) {
+                (Some(_), Some(_)) => {
+                    return Err(format!(
+                        "line {}: device '{name}': 'ts' and 'freq' are mutually exclusive \
+                             (both set this block's sample time)",
+                        line_number + 1
+                    ))
+                }
+                (Some(_), None) => Some(get("ts")?),
+                (None, Some(_)) => Some(1.0 / get("freq")?),
+                (None, None) => None,
+            };
+            let xc_count = match fields.get("xc_count") {
+                Some(s) => s.parse::<usize>().map_err(|_| {
+                    format!(
+                        "line {}: device '{name}' field 'xc_count' is not a non-negative \
+                         integer",
+                        line_number + 1
+                    )
+                })?,
+                None => 0,
+            };
+            Kind::Block(BlockInstance {
+                name: name.to_string(),
+                kind: BlockKind::PyBlock {
+                    path,
+                    output_names,
+                    sample_time,
+                    xc_count,
+                },
+                inputs,
+            })
+        }
         "statespace" => {
             let a = parse_matrix_rows(&get_str("a")?, name, "a", line_number)?;
             // `b=`/`c=` accept either their original SISO shorthand (a flat list -- `b=[1,0]`

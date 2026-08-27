@@ -355,6 +355,23 @@ pub enum BlockKind {
         sample_time: Option<f64>,
         xc_count: usize,
     },
+    /// A dynamically-loaded, user-supplied Python block (see `pyblock_ffi`) — the Python-hosted
+    /// counterpart to [`BlockKind::CScript`]: an escape hatch to a full scripting language
+    /// (including `numpy`/`scipy`) when the existing block library doesn't cover something.
+    /// `path` is a `.py` file
+    /// exporting `start`/`output` (or, if `xc_count > 0`, `start`/`derivative`/`output_xc`
+    /// *instead of* `output` — the same continuous-state split `CScript`'s own `xc_count` has,
+    /// for the same reason). `output_names`/`sample_time`/`xc_count` all have exactly the same
+    /// meaning as `CScript`'s own fields — deliberately scalar-only outputs, the same zero-
+    /// order-hold `sample_time` convention, the same solver-integrated-vs-hand-managed state
+    /// split. See `general-simulator`'s own `book/dev-guide/src/python-blocks.md` for the full
+    /// design and the measurements behind it.
+    PyBlock {
+        path: std::path::PathBuf,
+        output_names: Vec<String>,
+        sample_time: Option<f64>,
+        xc_count: usize,
+    },
     /// One of the six Clarke/Park coordinate transforms (see
     /// [`continuous_blocks::CoordinateTransform`]) — the standard `abc`/`alpha-beta-0`/`d-q-0`
     /// change of basis used to regulate a three-phase quantity (grid-tied PFC, motor drive) with
@@ -531,6 +548,7 @@ pub fn block_kind_name(kind: &BlockKind) -> &'static str {
         BlockKind::MathFn3(f) => f.name(),
         BlockKind::Hysteresis(_) => "hysteresis",
         BlockKind::CScript { .. } => "cscript",
+        BlockKind::PyBlock { .. } => "pyblock",
         BlockKind::CoordinateTransform { kind, .. } => kind.name(),
         BlockKind::Pmsm { .. } => "pmsm",
         BlockKind::Probe(_) => "probe",
