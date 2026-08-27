@@ -13,7 +13,9 @@ use general_spice_core::dialect::Dialect;
 use general_spice_core::{lexer, parser};
 use pwl_devices::{Diode, Mosfet};
 
-use crate::block_graph::{BlockInstance, BlockKind, GateBinding, PidClamp, ProbeTarget, Signal};
+use crate::block_graph::{
+    BlockInstance, BlockKind, ConstValue, GainValue, GateBinding, PidClamp, ProbeTarget, Signal,
+};
 use crate::hierarchy;
 use crate::{MnaBuilder, MnaSystem, TransientFunction};
 
@@ -191,6 +193,96 @@ fn parse_xy_points(
     Ok(points)
 }
 
+/// Parses a `kind=const` block's `value=` field: a bare scalar (`value=5`, unchanged from
+/// before vector signals existed) or a Python-style flat list (`value=[1,2,3]`), a fixed
+/// constant vector.
+fn parse_const_value(
+    text: &str,
+    name: &str,
+    field: &str,
+    line_number: usize,
+) -> Result<ConstValue, String> {
+    if text.trim().starts_with('[') {
+        Ok(ConstValue::Vector(parse_vector(
+            text,
+            name,
+            field,
+            line_number,
+        )?))
+    } else {
+        text.trim()
+            .parse::<f64>()
+            .map(ConstValue::Scalar)
+            .map_err(|_| {
+                format!(
+                    "line {}: device '{name}' field '{field}' is not a number",
+                    line_number + 1
+                )
+            })
+    }
+}
+
+/// Parses a `kind=gain` block's `k=` field: a bare scalar (`k=2.0`, unchanged from before
+/// vector signals existed) or a Python-style *nested* list (`k=[[1,0],[0,1]]`), a fixed `M x N`
+/// matrix for a genuine matrix-vector product. A flat list (`k=[1,2,3]`) is not a valid `Gain`
+/// shape at all -- unlike `Const`, `Gain`'s own value is never itself a vector -- so it's
+/// rejected here with a clear error rather than silently guessed at.
+fn parse_gain_value(
+    text: &str,
+    name: &str,
+    field: &str,
+    line_number: usize,
+) -> Result<GainValue, String> {
+    let trimmed = text.trim();
+    if trimmed.starts_with('[') {
+        let inner = strip_brackets(text, name, field, line_number)?;
+        if inner.trim_start().starts_with('[') {
+            return Ok(GainValue::Matrix(parse_matrix_rows(
+                text,
+                name,
+                field,
+                line_number,
+            )?));
+        }
+        return Err(format!(
+            "line {}: device '{name}' field '{field}' must be a scalar (e.g. '2.0') or a \
+             matrix (e.g. '[[1,0],[0,1]]') -- got a flat list '{text}', which is not a valid \
+             Gain shape",
+            line_number + 1
+        ));
+    }
+    trimmed.parse::<f64>().map(GainValue::Scalar).map_err(|_| {
+        format!(
+            "line {}: device '{name}' field '{field}' is not a number",
+            line_number + 1
+        )
+    })
+}
+
+/// Parses a `kind=statespace` block's `b=`/`c=` field: a flat list (`b=[1,0]`, `c=[1,0]` — the
+/// original SISO shorthand, unchanged) or a genuine matrix (`b=[[1,0],[0,1]]`,
+/// `c=[[1,0],[0,1]]`, for real MIMO). `as_column`: `true` wraps a flat-list result as an `n x 1`
+/// column matrix (`b`'s own shorthand meaning "exactly one input"); `false` wraps it as a `1 x
+/// n` row matrix (`c`'s own shorthand meaning "exactly one output").
+fn parse_matrix_or_vector_shorthand(
+    text: &str,
+    name: &str,
+    field: &str,
+    line_number: usize,
+    as_column: bool,
+) -> Result<Vec<Vec<f64>>, String> {
+    let inner = strip_brackets(text, name, field, line_number)?;
+    if inner.trim_start().starts_with('[') {
+        return parse_matrix_rows(text, name, field, line_number);
+    }
+    let v = parse_vector(text, name, field, line_number)?;
+    Ok(if as_column {
+        v.into_iter().map(|x| vec![x]).collect()
+    } else {
+        vec![v]
+    })
+}
+
 /// Parses a Python-style list of numbers, e.g. a `kind=statespace` block's `b=[1,2]`/`c=[1,0]`
 /// vector or a `kind=tf` block's `num=[1,2]`/`den=[1,3,2]` coefficients.
 fn parse_vector(
@@ -326,7 +418,12 @@ fn build_kind(stmt: &general_spice_core::ast::BlockInstance) -> Result<Kind, Str
         }
         "const" => Kind::Block(BlockInstance {
             name: name.to_string(),
-            kind: BlockKind::Const(get("value")?),
+            kind: BlockKind::Const(parse_const_value(
+                &get_str("value")?,
+                name,
+                "value",
+                line_number,
+            )?),
             inputs: Vec::new(),
         }),
         "time" => Kind::Block(BlockInstance {
@@ -488,7 +585,7 @@ fn build_kind(stmt: &general_spice_core::ast::BlockInstance) -> Result<Kind, Str
         }
         "gain" => Kind::Block(BlockInstance {
             name: name.to_string(),
-            kind: BlockKind::Gain(get("k")?),
+            kind: BlockKind::Gain(parse_gain_value(&get_str("k")?, name, "k", line_number)?),
             inputs: vec![parse_signal(&get_str("in")?)],
         }),
         "pid" => {
@@ -700,36 +797,70 @@ fn build_kind(stmt: &general_spice_core::ast::BlockInstance) -> Result<Kind, Str
         }
         "statespace" => {
             let a = parse_matrix_rows(&get_str("a")?, name, "a", line_number)?;
-            let b_vec = parse_vector(&get_str("b")?, name, "b", line_number)?;
-            let c_vec = parse_vector(&get_str("c")?, name, "c", line_number)?;
-            let d = fields
-                .get("d")
-                .map(|s| {
-                    s.parse::<f64>().map_err(|_| {
+            // `b=`/`c=` accept either their original SISO shorthand (a flat list -- `b=[1,0]`
+            // means "one input," `c=[1,0]` means "one output," exactly as before vector
+            // signals existed) or a genuine matrix (`b=[[1,0],[0,1]]`, n x p for p inputs;
+            // `c=[[1,0]]`, q x n for q outputs) for a real MIMO declaration. Detected the same
+            // way `parse_gain_value` detects a matrix: does the field, after stripping its own
+            // outer brackets, immediately start with another `[`.
+            let b = parse_matrix_or_vector_shorthand(&get_str("b")?, name, "b", line_number, true)?;
+            let c =
+                parse_matrix_or_vector_shorthand(&get_str("c")?, name, "c", line_number, false)?;
+            let p = b.first().map_or(0, |row| row.len());
+            let q = c.len();
+            // `d=` defaults to an all-zero q x p matrix when omitted (generalizing the old
+            // default of 0.0 cleanly); given as a matrix (`d=[[..],..]`) for MIMO, or a bare
+            // scalar only when the system is genuinely 1x1 (SISO) -- a lone scalar has no
+            // unambiguous placement in a larger D matrix, so it's rejected rather than guessed
+            // at once q>1 or p>1.
+            let d = match fields.get("d") {
+                None => vec![vec![0.0; p]; q],
+                Some(text) if text.trim().starts_with('[') => {
+                    parse_matrix_rows(text, name, "d", line_number)?
+                }
+                Some(text) => {
+                    if q != 1 || p != 1 {
+                        return Err(format!(
+                            "line {}: device '{name}' field 'd' is a bare scalar, but this \
+                             system has {q} output(s) and {p} input(s) -- declare \
+                             'd=[[...],...]' ({q}x{p}) for a MIMO system, a bare scalar is only \
+                             valid for a 1x1 (SISO) one",
+                            line_number + 1
+                        ));
+                    }
+                    let v: f64 = text.trim().parse().map_err(|_| {
                         format!(
                             "line {}: device '{name}' field 'd' is not a number",
                             line_number + 1
                         )
-                    })
-                })
-                .transpose()?
-                .unwrap_or(0.0);
-            let b: Vec<Vec<f64>> = b_vec.into_iter().map(|v| vec![v]).collect();
-            let c: Vec<Vec<f64>> = vec![c_vec];
+                    })?;
+                    vec![vec![v]]
+                }
+            };
             // No `e=` field exposed at the CLI level yet, so this is always the trivial
             // (always-valid) e=None case -- StateSpace::new still runs the same check every
             // other block-kind constructor here does, so a future `e=` field only has to
             // add parsing, not a new validation path.
-            let ss = StateSpace::new(a, b, c, vec![vec![d]], None).map_err(|e| {
+            let ss = StateSpace::new(a, b, c, d, None).map_err(|e| {
                 format!(
                     "line {}: device '{name}': invalid statespace ({e:?})",
                     line_number + 1
                 )
             })?;
+            // `in=<signal>` (SISO shorthand, p must be 1) or `inputs=<signal>,<signal>,...`
+            // (exactly p entries, each independently scalar or vector -- flattened by
+            // `dae-runtime`'s own evaluate_blocks into the u vector `StateSpace::rk4_step`
+            // expects; the *total* flattened length must equal p, checked there, not here,
+            // since arity from a vector-valued upstream signal isn't knowable from netlist text
+            // alone).
+            let inputs = match fields.get("inputs") {
+                Some(list) => list.split(',').map(parse_signal).collect(),
+                None => vec![parse_signal(&get_str("in")?)],
+            };
             Kind::Block(BlockInstance {
                 name: name.to_string(),
                 kind: BlockKind::StateSpace(ss),
-                inputs: vec![parse_signal(&get_str("in")?)],
+                inputs,
             })
         }
         "tf" => {

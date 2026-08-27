@@ -4,7 +4,7 @@
 //! Phase 2 of the format-unification plan: `general-simulator` no longer parses the block DSL
 //! itself, it only evaluates what this builder hands it.
 
-use general_mna::block_graph::{BlockKind, GateBinding, Signal};
+use general_mna::block_graph::{BlockKind, ConstValue, GateBinding, Signal};
 use general_mna::{build_system, System};
 use general_spice_core::dialect::Dialect;
 
@@ -35,7 +35,7 @@ fn a_block_line_parses_without_any_star_disguise() {
     let System { blocks, .. } = build_system(source, Dialect::Ngspice).unwrap();
     assert_eq!(blocks.len(), 1);
     assert_eq!(blocks[0].name, "DUTY");
-    assert_eq!(blocks[0].kind, BlockKind::Const(0.5));
+    assert_eq!(blocks[0].kind, BlockKind::Const(ConstValue::Scalar(0.5)));
 }
 
 #[test]

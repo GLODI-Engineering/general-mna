@@ -65,6 +65,62 @@ pub enum Signal {
     BlockPrev(String),
 }
 
+/// The value one named block produces (or one `Signal` resolves to) at a given step: a bare
+/// scalar — everything this graph supported before this variant existed — or a fixed-length
+/// vector of scalars. Arity is fixed once a block declares it (known at graph-build time from
+/// its own parameters, e.g. a matrix `Gain`'s own row count, a `Const` vector literal's own
+/// length, `StateSpace`'s own `C` row count) — there is no dynamic/runtime-determined length.
+///
+/// **No type tagging beyond `Scalar`/`Vector` exists, or is needed.** This graph has never had
+/// a `bool` type, even for scalars — a "boolean" signal (a `Hysteresis` output, a PWM
+/// `main`/`complement` output) has always just been an `f64` interpreted via a `>= 0.5`
+/// threshold by whatever reads it. A `Vector`'s own elements are exactly as untyped as a scalar
+/// signal already was; nothing tracked "this element is really a voltage" vs. "this element is
+/// really a gate command" before, and nothing needs to start now.
+///
+/// Which `BlockKind`s accept/produce a `Vector`, and the exact broadcast/reduction/rejection
+/// rule for each, is a per-block-kind decision worked out in
+/// `general-simulator`'s own `book/dev-guide/src/vector-signals.md`.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SignalValue {
+    Scalar(f64),
+    Vector(Vec<f64>),
+}
+
+impl SignalValue {
+    /// `1` for a `Scalar`, the element count for a `Vector`.
+    pub fn len(&self) -> usize {
+        match self {
+            SignalValue::Scalar(_) => 1,
+            SignalValue::Vector(v) => v.len(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// `Some(x)` for a `Scalar`, `None` for a `Vector` — the check every scalar-only `BlockKind`
+    /// makes on each of its own inputs before doing anything else.
+    pub fn as_scalar(&self) -> Option<f64> {
+        match self {
+            SignalValue::Scalar(x) => Some(*x),
+            SignalValue::Vector(_) => None,
+        }
+    }
+
+    /// This value's own elements, in order, as a plain slice — a `Scalar` is a length-1 slice.
+    /// The flattening primitive every input-bundling block (`cscript`, `statespace`,
+    /// `CoordinateTransform`, `Pmsm`) builds its own input vector from: several `SignalValue`s,
+    /// scalar or vector, concatenated in declared order.
+    pub fn as_slice(&self) -> &[f64] {
+        match self {
+            SignalValue::Scalar(x) => std::slice::from_ref(x),
+            SignalValue::Vector(v) => v,
+        }
+    }
+}
+
 /// What a [`BlockKind::Probe`] reads from the circuit's own previous-step operating point —
 /// `V(node)` or `I(branch)`, anything [`OperatingPoint::value`] accepts, keyed by exactly the
 /// same `V(...)`/`I(...)` naming convention `general-mna` itself uses for MNA unknowns.
@@ -94,13 +150,30 @@ pub enum PidClamp {
     Dynamic,
 }
 
+/// A [`BlockKind::Const`]'s own fixed value.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ConstValue {
+    Scalar(f64),
+    Vector(Vec<f64>),
+}
+
+/// A [`BlockKind::Gain`]'s own scale factor — a plain scalar (the only form before vector
+/// signals existed, unchanged), or a fixed `M x N` matrix (row-major, `matrix[row][col]`) for a
+/// genuine matrix-vector product.
+#[derive(Debug, Clone, PartialEq)]
+pub enum GainValue {
+    Scalar(f64),
+    Matrix(Vec<Vec<f64>>),
+}
+
 /// One block's behavior. `Const`/`Pwc`/`Pwl`/`Sin`/`Pulse`/`Exp`/`Sffm` are sources (zero
 /// inputs); `Sum`/`Gain` are stateless (recomputed fresh from their inputs every step);
 /// `Pid`/`StateSpace`/`TransferFunction`/`Vco` carry their own state forward across steps.
 #[derive(Debug, Clone, PartialEq)]
 pub enum BlockKind {
-    /// A fixed value, ignoring time — e.g. a nominal frequency or a fixed setpoint.
-    Const(f64),
+    /// A fixed value, ignoring time — e.g. a nominal frequency or a fixed setpoint (`Scalar`),
+    /// or a fixed constant vector (`Vector`, e.g. a per-element offset feeding a vector `Sum`).
+    Const(ConstValue),
     /// The current step's own simulated time (seconds), zero inputs — the standard
     /// block-diagram "clock" source, needed to build a genuine `sin(2*pi*f*t)`-style time
     /// varying signal out of `MathFn1`/`Gain` blocks (there's otherwise no way for a block to
@@ -143,8 +216,11 @@ pub enum BlockKind {
     Waveform(TransientFunction),
     /// Weighted sum of its inputs, one sign per input (`+1.0`/`-1.0` for an error junction).
     Sum(Vec<f64>),
-    /// Scales its single input.
-    Gain(f64),
+    /// Scales its single input. `Scalar(k)`: `Scalar -> Scalar` (`k*x`) or `Vector(N) ->
+    /// Vector(N)` (every element scaled by `k`, broadcast). `Matrix(K)` (an `M x N` matrix):
+    /// requires a `Vector` input of length exactly `N` (rejects a `Scalar`, rejects a `Vector`
+    /// of the wrong length), output is `Vector(M)`, the matrix-vector product `K*x`.
+    Gain(GainValue),
     /// A compiled PID with two-sided conditional-integration anti-windup against `clamp` — see
     /// [`crate::simulate_closed_loop`]'s doc comment for why two-sided anti-windup matters; the
     /// mechanism here is identical, just attached to this block instead of baked into a whole
@@ -153,12 +229,19 @@ pub enum BlockKind {
     /// PID block's own configured output limits. See [`PidClamp`] for the fixed-vs-dynamic
     /// choice and what it changes about this block's own input count.
     Pid { pid: Pid, clamp: PidClamp },
-    /// An arbitrary single-input single-output continuous-time block given directly as its own
-    /// `(A, B, C, D)` matrices — a compensator/filter that doesn't already have a named
-    /// convenience constructor, e.g. a low-pass filter placed ahead of a `Pid` to damp a
-    /// resonant plant. No anti-windup (that's specifically a `Pid` output's own concern, not
-    /// every dynamic block's); stepped forward unconditionally every timestep via
-    /// `StateSpace::rk4_step`.
+    /// An arbitrary continuous-time block given directly as its own `(A, B, C, D)` matrices — a
+    /// compensator/filter that doesn't already have a named convenience constructor, e.g. a
+    /// low-pass filter placed ahead of a `Pid` to damp a resonant plant. Genuinely MIMO: `B`'s
+    /// own column count (`StateSpace::inputs()`) and `C`'s own row count (`StateSpace::
+    /// outputs()`) are not constrained to `1` — a single-input single-output declaration (the
+    /// only shape this block supported before vector signals existed) is simply the `1x1` case,
+    /// unchanged. `outputs() == 1` produces a `SignalValue::Scalar`; `outputs() > 1` produces a
+    /// `SignalValue::Vector` of that length. Inputs are the flattened concatenation of this
+    /// block's own declared `Signal`s (scalar or vector, in order) — see
+    /// `evaluate_blocks`'/`dae-runtime`'s own input-flattening convention, shared with
+    /// `CoordinateTransform`/`Pmsm`/`CScript`. No anti-windup (that's specifically a `Pid`
+    /// output's own concern, not every dynamic block's); stepped forward unconditionally every
+    /// timestep via `StateSpace::rk4_step`.
     StateSpace(StateSpace),
     /// A single-input single-output block given as a rational `N(s)/D(s)` (numerator/
     /// denominator coefficients, highest-degree first) rather than a `Pid`'s `Kp`/`Ki`/`Kd`
@@ -392,9 +475,22 @@ impl GateBinding {
         }
     }
 
-    pub fn resolve(&self, outputs: &BTreeMap<String, f64>) -> SwitchState {
+    /// # Panics
+    /// If the named block's own current value is a `SignalValue::Vector` — unreachable in
+    /// practice, since the *only* legal `GateBinding` target is a `BlockKind::Sig2Gate`
+    /// converter (enforced before any step runs), and `Sig2Gate` itself rejects a `Vector`
+    /// input at evaluation time — there is no way for a validly-targeted gate to ever see one
+    /// here. Also panics if `name` isn't in `outputs` at all, exactly as before this variant
+    /// existed (equally unreachable, for the same "checked before any step runs" reason).
+    pub fn resolve(&self, outputs: &BTreeMap<String, SignalValue>) -> SwitchState {
         let GateBinding::Block(name) = self;
-        if outputs[name.as_str()] >= 0.5 {
+        let value = outputs[name.as_str()].as_scalar().unwrap_or_else(|| {
+            panic!(
+                "gate '{name}' resolved to a vector signal -- unreachable, since Sig2Gate \
+                 itself must already reject a vector input"
+            )
+        });
+        if value >= 0.5 {
             SwitchState::On
         } else {
             SwitchState::Off
