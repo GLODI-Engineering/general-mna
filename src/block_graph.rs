@@ -40,8 +40,9 @@ use crate::{SwitchState, TransientFunction};
 /// domain into the signal domain must go through an explicit, named [`BlockKind::Probe`] block
 /// instead (referenced afterward like any other block, via `Signal::Block`). See
 /// [`BlockKind::Probe`]'s own doc comment for why this boundary is enforced rather than
-/// implicit, the same way a reference tool/Simscape requires an explicit PS-a reference tool Converter block
-/// between a physical port and a signal port instead of wiring them together directly.
+/// implicit, the same way a real block-diagram tool requires an explicit physical/signal
+/// converter block between a physical port and a signal port instead of wiring them together
+/// directly.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Signal {
     /// Another block's output *this* step — may name any block in the same slice, declared
@@ -522,12 +523,12 @@ pub enum BlockKind {
     /// own previous-step operating point directly, the same `point_prev` lookup a bare
     /// `meas:`-style reference used to do before this was enforced) — its value is then an
     /// ordinary block output, read by any downstream block via `Signal::Block(this_block's_name)`
-    /// exactly like any other source block (`Const`/`Pwl`/`Time`). Modeled directly on
-    /// a reference tool/Simscape's own PS-a reference tool Converter: a physical port and a signal port are
-    /// type-distinct there and cannot be wired together without one of these in between: this
-    /// is the same rule, enforced the same way, at the netlist level instead of a GUI's wiring
-    /// canvas (a future UI enforcing the same rule visually is the intended companion, not a
-    /// replacement for this).
+    /// exactly like any other source block (`Const`/`Pwl`/`Time`). Modeled directly on the
+    /// physical/signal converter block a real block-diagram tool requires: a physical port and
+    /// a signal port are type-distinct there and cannot be wired together without one of these
+    /// in between: this is the same rule, enforced the same way, at the netlist level instead
+    /// of a GUI's wiring canvas (a future UI enforcing the same rule visually is the intended
+    /// companion, not a replacement for this).
     Probe(ProbeTarget),
     /// The **Signal-to-PS** converter for a continuous quantity, closing the write-direction
     /// gap [`BlockKind::Probe`] doesn't (a probe only ever reads): the *only* legal way a

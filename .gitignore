@@ -6,3 +6,6 @@ __pycache__/
 artifacts/*.aux
 artifacts/*.log
 artifacts/*.out
+
+# Local-only pre-commit hook script -- not published (kept out of the public repo on purpose).
+/scripts/style-guard.sh
