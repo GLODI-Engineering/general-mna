@@ -27,10 +27,15 @@ use crate::{MnaBuilder, MnaSystem, TransientFunction};
 /// electrical (`mna`/`diodes`/`mosfets`/`gates`) and signal-domain (`blocks`) halves.
 #[derive(Debug)]
 pub struct System {
+    /// The electrical MNA system, built by [`crate::MnaBuilder`] from the netlist's element lines.
     pub mna: MnaSystem,
+    /// Every `D` instance, keyed by name, as a companion diode model.
     pub diodes: BTreeMap<String, Diode>,
+    /// Every MOSFET-like switch instance, keyed by name.
     pub mosfets: BTreeMap<String, Mosfet>,
+    /// Each MOSFET's resolved gate-drive signal, keyed by the same name as `mosfets`.
     pub gates: BTreeMap<String, GateBinding>,
+    /// Every block/signal-domain (`kind=...`) instance, in source declaration order.
     pub blocks: Vec<BlockInstance>,
     /// Every MOSFET's shared on-resistance (`dae-runtime`'s switch model uses one shared value
     /// per call) — `0.0` if there are no MOSFETs at all. `build_system` already enforces every
@@ -49,7 +54,7 @@ enum Kind {
 }
 
 /// Parses `source` under `dialect` and flattens every `.subckt`/`X`-instance into one flat,
-/// dotted-path-named statement list (see [`hierarchy::flatten`]) — the shared first step behind
+/// dotted-path-named statement list (see `hierarchy::flatten`) — the shared first step behind
 /// [`build_system`] and behind any downstream consumer (e.g. `dae-runtime`) that needs to build
 /// its own `MnaSystem` from the same, already-hierarchy-resolved statements rather than
 /// re-parsing raw text (and silently losing hierarchy) itself.
@@ -65,7 +70,7 @@ pub fn parse_and_flatten(source: &str, dialect: Dialect) -> Result<Vec<Statement
 /// Parses `source` under `dialect` and builds the complete [`System`] — the one entry point a
 /// simulator needs; no parsing code of its own required downstream. Electrical statements go
 /// through the existing [`MnaBuilder`] machinery unchanged; block/signal-domain statements
-/// (`Statement::BlockInstance`) are dispatched by [`build_kind`] into a `diode`/`mosfet`/block
+/// (`Statement::BlockInstance`) are dispatched by `build_kind` into a `diode`/`mosfet`/block
 /// entry, keyed by the statement's own name.
 pub fn build_system(source: &str, dialect: Dialect) -> Result<System, String> {
     let statements = parse_and_flatten(source, dialect)?;

@@ -11,6 +11,15 @@
 //! matrix (often called `C`), and `B` maps independent sources into the
 //! equation. Matrices contain [`Expression`] values so downstream Python,
 //! SymPy, JavaScript, and PDF layers can preserve component names.
+//!
+//! Every public item is documented — `cargo doc --open` is a complete
+//! reference; reading the source should never be necessary just to call
+//! this crate. Start with [`MnaBuilder`] for parsing a netlist into an
+//! [`MnaSystem`], [`average`] for converter-phase averaging, and
+//! [`block_graph`] for the signal-domain block vocabulary consumed by
+//! `dae-runtime`.
+
+#![warn(missing_docs)]
 
 mod averaging;
 pub mod block_graph;

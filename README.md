@@ -97,6 +97,35 @@ cargo run --example rc_state_space
 Use `build_document` instead of `build_fragment` for a normal SPICE file with
 a mandatory title line.
 
+## Full system: electrical + block/signal-domain graph (`build_system`)
+
+`MnaBuilder::build_fragment` above only sees electrical elements. A netlist may also declare
+`kind=...` block/signal-domain statements (PID compensators, PWM modulators, logic, coordinate
+transforms — see `spice-lsp/docs/GRAMMAR.md` §12) and `.subckt`/`X`-instance hierarchy. For
+those, use `build_system` instead — it flattens hierarchy, builds the electrical `MnaSystem`,
+and dispatches every block statement, all in one call:
+
+```rust
+use general_mna::{build_system};
+use general_spice_core::Dialect;
+
+let netlist = "V1 in 0 1\nR1 in out R\nC1 out 0 C\n\
+     ERR kind=const value=0\nPID1 kind=pid in=ERR kp=1 ki=0 kd=0 n=1 clamp_lo=-1 clamp_hi=1";
+let system = build_system(netlist, Dialect::Ngspice)?;
+// system.mna       -> the same MnaSystem build_fragment produces
+// system.diodes     -> named `D` instances
+// system.mosfets    -> named MOSFET-like switch instances
+// system.gates      -> each MOSFET's resolved gate-drive signal
+// system.blocks     -> every `kind=...` instance, in declaration order
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+This crate does not evaluate the block graph over time — [`block_graph`] only defines the type
+vocabulary (`BlockKind`, `Signal`, `GateBinding`, ...); a sibling `dae-runtime` crate imports
+these types to actually step them through a transient simulation alongside the electrical
+solve. Every type and field there is documented — `cargo doc --open -p general-mna` and start
+at the `block_graph` module.
+
 ## Converter averaging
 
 Build each topology from the same parsed netlist and override switch names:

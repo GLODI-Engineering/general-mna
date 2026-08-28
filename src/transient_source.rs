@@ -28,11 +28,17 @@ pub enum TransientFunction {
     /// exp(-(t-TD)*THETA)` (`THETA=0` is a plain undamped sinusoid; `FREQ` in Hz, `PHASE` in
     /// degrees, matching every SPICE dialect's own convention for this source).
     Sin {
+        /// Offset value held before `td` and added under the sinusoid afterward.
         v0: f64,
+        /// Sinusoid amplitude.
         va: f64,
+        /// Sinusoid frequency in Hz.
         freq: f64,
+        /// Delay, in seconds, before the sinusoid starts.
         td: f64,
+        /// Exponential damping factor (`0` = undamped).
         theta: f64,
+        /// Phase offset in degrees.
         phase: f64,
     },
     /// `PULSE(V1 V2 TD TR TF PW PER)` — a periodic trapezoid: `V1` until `TD`, linear ramp to
@@ -41,23 +47,36 @@ pub enum TransientFunction {
     /// as instantaneous edges (division by a real, if tiny, ramp time is what every real SPICE
     /// implementation does instead; `0` is special-cased here to avoid dividing by zero).
     Pulse {
+        /// Initial (and final, between periods) value.
         v1: f64,
+        /// Pulsed value.
         v2: f64,
+        /// Delay, in seconds, before the first pulse starts.
         td: f64,
+        /// Rise time from `v1` to `v2`; `0` is treated as an instantaneous edge.
         tr: f64,
+        /// Fall time from `v2` back to `v1`; `0` is treated as an instantaneous edge.
         tf: f64,
+        /// Duration held at `v2`.
         pw: f64,
+        /// Total period; the remainder after `td + tr + pw + tf` is held at `v1`.
         per: f64,
     },
     /// `EXP(V1 V2 TD1 TAU1 TD2 TAU2)` — flat at `V1` until `TD1`, exponential transition
     /// toward `V2` with time constant `TAU1` starting at `TD1`, exponential transition back
     /// toward `V1` with time constant `TAU2` starting at `TD2`.
     Exp {
+        /// Initial value, held until `td1`.
         v1: f64,
+        /// Value the first exponential transition rises or decays toward.
         v2: f64,
+        /// Delay, in seconds, before the transition toward `v2` starts.
         td1: f64,
+        /// Time constant of the transition toward `v2`.
         tau1: f64,
+        /// Delay, in seconds, before the transition back toward `v1` starts.
         td2: f64,
+        /// Time constant of the transition back toward `v1`.
         tau2: f64,
     },
     /// `PWL(t1 v1 t2 v2 ...)` — linearly interpolated between explicit `(time, value)`
@@ -68,10 +87,15 @@ pub enum TransientFunction {
     Pwl(PwlPoints),
     /// `SFFM(V0 VA FC MDI FS)` — single-frequency FM: `V0 + VA*sin(2*pi*FC*t + MDI*sin(2*pi*FS*t))`.
     Sffm {
+        /// Offset value.
         v0: f64,
+        /// Carrier amplitude.
         va: f64,
+        /// Carrier frequency in Hz.
         fc: f64,
+        /// Modulation index.
         mdi: f64,
+        /// Signal (modulating) frequency in Hz.
         fs: f64,
     },
 }
@@ -85,6 +109,8 @@ pub enum TransientFunction {
 pub struct PwlPoints(Vec<(f64, f64)>);
 
 impl PwlPoints {
+    /// Builds a breakpoint list, or `None` if `points` is empty (a `PWL` source needs at least
+    /// one `(time, value)` pair).
     pub fn new(points: &[(f64, f64)]) -> Option<Self> {
         if points.is_empty() {
             return None;
@@ -92,6 +118,7 @@ impl PwlPoints {
         Some(PwlPoints(points.to_vec()))
     }
 
+    /// The breakpoints in declaration order, each as `(time, value)`.
     pub fn as_slice(&self) -> &[(f64, f64)] {
         &self.0
     }

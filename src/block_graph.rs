@@ -46,7 +46,7 @@ use crate::{SwitchState, TransientFunction};
 #[derive(Debug, Clone, PartialEq)]
 pub enum Signal {
     /// Another block's output *this* step — may name any block in the same slice, declared
-    /// before or after this one: [`topological_order`] derives each step's actual evaluation
+    /// before or after this one: `topological_order` derives each step's actual evaluation
     /// order from the full `Signal::Block` dependency graph, not declaration position, so
     /// "before/after" in the source text no longer has to match causal order (see that
     /// function). A genuine same-step cycle among these edges (`A` depends on `B` depends on
@@ -57,8 +57,8 @@ pub enum Signal {
     /// A named block's own output from the *previous* step (`0.0` before the first step,
     /// matching every dynamic block's own "starts at rest" convention). Unlike `Signal::Block`,
     /// this is not a same-step dependency at all — it reads state fixed before this step even
-    /// starts — so it never contributes an edge to the dependency graph [`topological_order`]
-    /// builds, and is consequently the *sanctioned* way to close what would otherwise be a
+    /// starts — so it never contributes an edge to the dependency graph `topological_order`
+    /// (in `dae-runtime`) builds, and is consequently the *sanctioned* way to close what would otherwise be a
     /// same-step cycle (e.g. a current controller regulating a [`BlockKind::Pmsm`]'s own
     /// `id`/`iq` outputs, or a PLL's angle estimate feeding the very
     /// [`BlockKind::CoordinateTransform`] `Park` block that produced its own error signal): the
@@ -84,7 +84,9 @@ pub enum Signal {
 /// `general-simulator`'s own `book/dev-guide/src/vector-signals.md`.
 #[derive(Debug, Clone, PartialEq)]
 pub enum SignalValue {
+    /// A single number.
     Scalar(f64),
+    /// A fixed-length bundle of numbers.
     Vector(Vec<f64>),
 }
 
@@ -97,6 +99,7 @@ impl SignalValue {
         }
     }
 
+    /// `true` only for an empty `Vector` (a `Scalar` is always length 1).
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
@@ -123,11 +126,13 @@ impl SignalValue {
 }
 
 /// What a [`BlockKind::Probe`] reads from the circuit's own previous-step operating point —
-/// `V(node)` or `I(branch)`, anything [`OperatingPoint::value`] accepts, keyed by exactly the
+/// `V(node)` or `I(branch)`, anything `OperatingPoint::value` (in `dae-runtime`) accepts, keyed by exactly the
 /// same `V(...)`/`I(...)` naming convention `general-mna` itself uses for MNA unknowns.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProbeTarget {
+    /// `V(node)` — the named node's voltage.
     Voltage(String),
+    /// `I(branch)` — the named branch's current.
     Current(String),
 }
 
@@ -147,14 +152,18 @@ pub enum ProbeTarget {
 /// count.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum PidClamp {
+    /// A fixed `(lo, hi)` anti-windup bound, set once at model-build time.
     Fixed(f64, f64),
+    /// The anti-windup bound is read fresh from two extra block inputs every step.
     Dynamic,
 }
 
 /// A [`BlockKind::Const`]'s own fixed value.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ConstValue {
+    /// A fixed number.
     Scalar(f64),
+    /// A fixed vector.
     Vector(Vec<f64>),
 }
 
@@ -163,7 +172,9 @@ pub enum ConstValue {
 /// genuine matrix-vector product.
 #[derive(Debug, Clone, PartialEq)]
 pub enum GainValue {
+    /// A plain scale factor.
     Scalar(f64),
+    /// A fixed `M x N` matrix, row-major (`matrix[row][col]`).
     Matrix(Vec<Vec<f64>>),
 }
 
@@ -183,7 +194,12 @@ pub enum SampleTimeSpec {
     /// construction code, not assumed) — i.e. the pre-existing behavior already *was* "no
     /// offset," not "one period's delay" as it might look at first glance. An explicit `to=X`
     /// (`0 < X < period`) genuinely delays the first hit to `t=X` instead.
-    Periodic { period: f64, offset: f64 },
+    Periodic {
+        /// The fixed sample period.
+        period: f64,
+        /// Phase offset delaying the first hit; `0.0 <= offset < period`.
+        offset: f64,
+    },
     /// The block computes its own next execution time itself, every time it runs (`ts=variable`
     /// in the netlist) — for a block whose own next event is known analytically at runtime (a
     /// modulator's own scheduled switching instant) rather than fixed at parse time. Requires
@@ -217,7 +233,9 @@ pub enum BlockKind {
     /// create with the real piecewise-*linear* SPICE-matching source below — see that variant's
     /// own doc comment).
     Pwc {
+        /// `(time, value)` breakpoints, in order.
         points: Vec<(f64, f64)>,
+        /// If `true`, wraps `t` into the breakpoint range instead of holding flat past the last point.
         repeat: bool,
     },
     /// A piecewise-**linear** function of time — real SPICE `PWL(t1 v1 t2 v2 ...)` semantics,
@@ -231,7 +249,9 @@ pub enum BlockKind {
     /// piecewise-linear waveform (a triangle/sawtooth reference, a repeating ramp) is only
     /// available here in the signal domain.
     Pwl {
+        /// `(time, value)` breakpoints, in order.
         points: Vec<(f64, f64)>,
+        /// If `true`, wraps `t` into the breakpoint range instead of holding flat past the last point.
         repeat: bool,
     },
     /// One of the electrical domain's four other time-varying source forms
@@ -250,13 +270,18 @@ pub enum BlockKind {
     /// of the wrong length), output is `Vector(M)`, the matrix-vector product `K*x`.
     Gain(GainValue),
     /// A compiled PID with two-sided conditional-integration anti-windup against `clamp` — see
-    /// [`crate::simulate_closed_loop`]'s doc comment for why two-sided anti-windup matters; the
+    /// `simulate_closed_loop`'s (in `dae-runtime`) doc comment for why two-sided anti-windup matters; the
     /// mechanism here is identical, just attached to this block instead of baked into a whole
     /// controller function. `clamp` is this PID's own notion of "my output is saturated,"
     /// independent of whatever downstream `Gain`/`Vco` blocks do to it after — same as a real
     /// PID block's own configured output limits. See [`PidClamp`] for the fixed-vs-dynamic
     /// choice and what it changes about this block's own input count.
-    Pid { pid: Pid, clamp: PidClamp },
+    Pid {
+        /// The compiled PID gains/state.
+        pid: Pid,
+        /// The fixed-vs-dynamic anti-windup bound.
+        clamp: PidClamp,
+    },
     /// An arbitrary continuous-time block given directly as its own `(A, B, C, D)` matrices — a
     /// compensator/filter that doesn't already have a named convenience constructor, e.g. a
     /// low-pass filter placed ahead of a `Pid` to damp a resonant plant. Genuinely MIMO: `B`'s
@@ -289,7 +314,9 @@ pub enum BlockKind {
     /// for `cscript`, and `Variable` doesn't compose with a fixed-period recursion at all. See
     /// `general-simulator`'s own `book/dev-guide/src/discrete-time-blocks.md`.
     DiscreteStateSpace {
+        /// The discrete-domain `A`/`B`/`C`/`D` matrices.
         ss: StateSpace,
+        /// Must be [`SampleTimeSpec::Periodic`] — a discrete system's dynamics are its sample period.
         sample_time: SampleTimeSpec,
     },
     /// The discrete-domain counterpart to [`BlockKind::TransferFunction`] above — `Y(z)/U(z) =
@@ -299,7 +326,9 @@ pub enum BlockKind {
     /// the variable is called `s` or `z`), evaluated via [`StateSpace::discrete_step`] instead
     /// of `rk4_step`. Same mandatory-`Periodic`-`sample_time` rule as `DiscreteStateSpace`.
     DiscreteTransferFunction {
+        /// The `z`-domain numerator/denominator coefficients.
         tf: TransferFunction,
+        /// Must be [`SampleTimeSpec::Periodic`].
         sample_time: SampleTimeSpec,
     },
     /// The discrete-domain counterpart to [`BlockKind::Pid`] above — reuses the exact same
@@ -313,8 +342,11 @@ pub enum BlockKind {
     /// above — `DiscretePid`'s own `period` field is set *from* this same `sample_time`, not a
     /// separately-entered value.
     DiscretePid {
+        /// The compiled discrete PID gains/state.
         pid: DiscretePid,
+        /// The fixed-vs-dynamic anti-windup bound.
         clamp: PidClamp,
+        /// Must be [`SampleTimeSpec::Periodic`]; also sets `pid`'s own `period`.
         sample_time: SampleTimeSpec,
     },
     /// A voltage-controlled oscillator (see [`Vco`]) — a bare, standalone oscillator producing
@@ -331,13 +363,17 @@ pub enum BlockKind {
     /// its active-high complement — the fusion of what used to be two separate `GateBinding`
     /// variants (`Pwm`/`PwmComplement`) into one component, per explicit request. `red`/`fed`
     /// (seconds) are independent per-edge dead-time delays — see
-    /// [`math_ops::complementary_pwm_with_deadtime`] for the exact rising-edge-only-delay
+    /// `math_ops::complementary_pwm_with_deadtime` (in `dae-runtime`) for the exact rising-edge-only-delay
     /// semantics and why `red=fed=0.0` recovers the ideal, gap-free, overlap-free pair exactly.
     /// Stateless: a pure function of `(t, duty)` every step, no internal oscillator.
     Pwm {
+        /// Fixed carrier frequency, Hz.
         freq_hz: f64,
+        /// Rising-edge dead time, seconds.
         red: f64,
+        /// Falling-edge dead time, seconds.
         fed: f64,
+        /// `[main, complement]` output names.
         output_names: Vec<String>,
     },
     /// **PWM Modulator 2**: frequency+phase+duty-driven, **active-high complementary** PWM —
@@ -359,14 +395,18 @@ pub enum BlockKind {
     /// higher switching frequency, a real effect on e.g. a resonant converter's own ZVS margin,
     /// not just bookkeeping.
     PhaseShiftPwm {
+        /// The internal frequency-integrating oscillator.
         osc: Vco,
+        /// Rising-edge dead time, seconds.
         red: f64,
+        /// Falling-edge dead time, seconds.
         fed: f64,
+        /// `[main, complement]` output names.
         output_names: Vec<String>,
     },
-    /// Multiplies all its inputs together (see [`math_ops::product`]).
+    /// Multiplies all its inputs together (see `math_ops::product` in `dae-runtime`).
     Product,
-    /// Clamps its single input to `[-limit, limit]` (see [`math_ops::saturation`]).
+    /// Clamps its single input to `[-limit, limit]` (see `math_ops::saturation` in `dae-runtime`).
     Saturation(f64),
     /// Linear interpolation through a fixed `(x, y)` table (see
     /// [`continuous_blocks::waveform_arithmetic::table`]) — a `table(x, a, b, c, d, ...)`-
@@ -400,13 +440,21 @@ pub enum BlockKind {
     /// `logic-signals.md`'s own Category 2 for the `set`-vs-`reset`-dominant tie-break
     /// `priority` resolves, and why `Set` (the default) is the right default for this block's
     /// own motivating use case, a sticky fault latch.
-    SrLatch { priority: LatchPriority },
+    SrLatch {
+        /// Which input wins when `set` and `reset` are asserted simultaneously.
+        priority: LatchPriority,
+    },
     /// An edge-triggered flip-flop — `kind=dff`/`jkff`/`tff`. Unlike [`BlockKind::SrLatch`]
     /// above, the next-state rule ([`FlipFlopKind::next_state`]) only fires at a detected rising
     /// `clk` edge; `dae-runtime`'s own `BlockState` holds the flip-flop's own previous `clk`
     /// sample alongside its output `q`, the bookkeeping a level-triggered latch doesn't need at
     /// all. See `logic-signals.md`'s own Category 3.
-    FlipFlop { kind: FlipFlopKind, reset: bool },
+    FlipFlop {
+        /// `dff`/`jkff`/`tff`.
+        kind: FlipFlopKind,
+        /// Whether this instance declares a synchronous reset input.
+        reset: bool,
+    },
     /// A clocked up/down counter — `kind=counter`. `up_down`/`modulus`/`reset` are all optional
     /// (`up_down` unset: always increments; `modulus` unset: free-running signed `i64`, wraps
     /// only at `i64`'s own bounds; `reset` unset: no synchronous reset input at all). Shares the
@@ -414,15 +462,18 @@ pub enum BlockKind {
     /// single bit to an integer count — see `logic-signals.md`'s own Category 4 for why this is
     /// one parameterized kind rather than separate `upcounter`/`downcounter`/`modcounter` kinds.
     Counter {
+        /// Whether this instance declares an up/down direction input (unset: always increments).
         up_down: bool,
+        /// Wraps at this value if set; free-running `i64` otherwise.
         modulus: Option<u32>,
+        /// Whether this instance declares a synchronous reset input.
         reset: bool,
     },
-    /// A dynamically-loaded, user-supplied block (see [`cscript_ffi`]): `lib` is a precompiled
+    /// A dynamically-loaded, user-supplied block (see `cscript_ffi` in `dae-runtime`): `lib` is a precompiled
     /// shared library exporting `cscript_start`/`cscript_output`/(optionally)`cscript_free`/
     /// `cscript_clone`, filling `output_names.len()` outputs. Unlike every other `BlockKind`,
-    /// this one can carry state no Rust type here knows anything about — see [`cscript_ffi`]'s
-    /// own module doc comment for the full C-side contract and why [`TimeStep::Adaptive`]
+    /// this one can carry state no Rust type here knows anything about — see `cscript_ffi`'s (in `dae-runtime`)
+    /// own module doc comment for the full C-side contract and why `TimeStep::Adaptive`
     /// requires `cscript_clone` to be exported.
     ///
     /// `sample_time`, if given, makes this block run on its *own* schedule, independent of the
@@ -444,9 +495,13 @@ pub enum BlockKind {
     /// export `cscript_start`/`cscript_derivative`/`cscript_output_xc`/(optionally)
     /// `cscript_free`/`cscript_clone` *instead of* `cscript_output`.
     CScript {
+        /// The precompiled shared library exporting the `cscript_*` C ABI.
         lib: std::path::PathBuf,
+        /// This block's own output names, in order.
         output_names: Vec<String>,
+        /// `None` runs every resolved circuit step; `Some` runs on its own schedule.
         sample_time: Option<SampleTimeSpec>,
+        /// Number of solver-integrated continuous states this block owns; `0` for the plain contract.
         xc_count: usize,
     },
     /// A dynamically-loaded, user-supplied Python block (see `pyblock_ffi`) — the Python-hosted
@@ -461,9 +516,13 @@ pub enum BlockKind {
     /// split. See `general-simulator`'s own `book/dev-guide/src/python-blocks.md` for the full
     /// design and the measurements behind it.
     PyBlock {
+        /// The `.py` file exporting `start`/`output` (or `start`/`derivative`/`output_xc`).
         path: std::path::PathBuf,
+        /// This block's own output names, in order.
         output_names: Vec<String>,
+        /// `None` runs every resolved circuit step; `Some` runs on its own schedule.
         sample_time: Option<SampleTimeSpec>,
+        /// Number of solver-integrated continuous states this block owns; `0` for the plain contract.
         xc_count: usize,
     },
     /// A plain, stateless, positionally-called Python function — a genuinely separate contract
@@ -480,9 +539,13 @@ pub enum BlockKind {
     /// [`SampleTimeSpec::Periodic`] applies to `PyFunction`.
     /// See `pyblock_ffi::PyFunctionInstance`'s own module doc comment for the full contract.
     PyFunction {
+        /// The `.py` file containing `function`.
         path: std::path::PathBuf,
+        /// The function name called with each declared input as a positional argument.
         function: String,
+        /// This block's own output names, in order.
         output_names: Vec<String>,
+        /// `None` runs every resolved circuit step; `Some` must be [`SampleTimeSpec::Periodic`].
         sample_time: Option<SampleTimeSpec>,
     },
     /// One of the six Clarke/Park coordinate transforms (see
@@ -498,7 +561,9 @@ pub enum BlockKind {
     /// `output_names` entries so a downstream block can reference them directly via
     /// `Signal::Block(name)`.
     CoordinateTransform {
+        /// Which of the six Clarke/Park transforms this is.
         kind: CoordinateTransform,
+        /// Output names; length must equal 3 for this family.
         output_names: Vec<String>,
     },
     /// A permanent-magnet synchronous motor (see [`continuous_blocks::Pmsm`]) — genuinely
@@ -515,7 +580,9 @@ pub enum BlockKind {
     /// at rest (`id = iq = omega_m = theta_e = 0`) — no initial-condition override, matching
     /// every other dynamic block in this graph.
     Pmsm {
+        /// The motor's own parameters/state.
         pmsm: Pmsm,
+        /// Output names; length must equal 4 (`id`, `iq`, `omega_m`, `theta_e`).
         output_names: Vec<String>,
     },
     /// The **PS-to-Signal** converter: the *only* way a circuit quantity (`V(node)`/
@@ -573,15 +640,18 @@ pub enum BlockKind {
 /// `CoordinateTransform` needs `kind.input_count()` (3 for `Clarke`/`ClarkeInv`, 4 for the
 /// others — see [`continuous_blocks::CoordinateTransform::input_count`]); `Pmsm` needs exactly
 /// three (`vd`, `vq`, `t_load`, in that order). Evaluated once per step in the causal order
-/// [`topological_order`] derives from the slice's own `Signal::Block` dependency graph — *not*
+/// `topological_order` (in `dae-runtime`) derives from the slice's own `Signal::Block` dependency graph — *not*
 /// the order the slice happens to be given in; a `Signal::Block` input may name any block in
 /// the same slice regardless of declared position (source blocks, naturally, need none, and a
 /// genuine cycle among these edges is rejected as `DaeError::AlgebraicLoop` before any step
 /// runs — see `topological_order`'s own doc comment for how).
 #[derive(Debug, Clone, PartialEq)]
 pub struct BlockInstance {
+    /// This block's own unique name.
     pub name: String,
+    /// What this block computes.
     pub kind: BlockKind,
+    /// Where each input comes from, in the order `kind` expects.
     pub inputs: Vec<Signal>,
 }
 
