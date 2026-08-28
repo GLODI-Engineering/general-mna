@@ -58,6 +58,16 @@ enum Kind {
 /// [`build_system`] and behind any downstream consumer (e.g. `dae-runtime`) that needs to build
 /// its own `MnaSystem` from the same, already-hierarchy-resolved statements rather than
 /// re-parsing raw text (and silently losing hierarchy) itself.
+///
+/// **`source` is parsed as a fragment, not a full document** (`general_spice_core::parser::parse`,
+/// not `parse_document`) — unlike the `MnaBuilder::build_document`/`build_fragment` distinction
+/// in this same crate's own README, there is no mandatory title line here: the *first* line of
+/// `source` is a real element/block statement, not skipped. A `general-simulator` netlist that
+/// leads with a title line (the normal SPICE-file convention) will have that line parsed as an
+/// element/block declaration and almost always fail — verified directly: an otherwise-correct
+/// netlist with a leading `"<title>"` text line failed with `UnsupportedElement`, naming a
+/// device letter taken from the title's own first word, not from anything the netlist author
+/// wrote as a device.
 pub fn parse_and_flatten(source: &str, dialect: Dialect) -> Result<Vec<Statement>, String> {
     let processed = lexer::preprocess(source, dialect);
     let statements: Vec<Statement> = parser::parse(&processed, dialect)
@@ -72,6 +82,9 @@ pub fn parse_and_flatten(source: &str, dialect: Dialect) -> Result<Vec<Statement
 /// through the existing [`MnaBuilder`] machinery unchanged; block/signal-domain statements
 /// (`Statement::BlockInstance`) are dispatched by `build_kind` into a `diode`/`mosfet`/block
 /// entry, keyed by the statement's own name.
+///
+/// **No mandatory title line** — see [`parse_and_flatten`]'s own doc comment, which this
+/// function calls first.
 pub fn build_system(source: &str, dialect: Dialect) -> Result<System, String> {
     let statements = parse_and_flatten(source, dialect)?;
 
