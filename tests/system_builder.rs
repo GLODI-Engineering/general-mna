@@ -113,3 +113,106 @@ fn a_block_declared_inside_a_subckt_body_still_parses_as_a_block_instance() {
     assert_eq!(blocks.len(), 1);
     assert_eq!(blocks[0].name, "X1.MOD");
 }
+
+#[test]
+fn logic_gates_parse_with_the_right_arity_and_op() {
+    use continuous_blocks::LogicOp;
+
+    let source = "AND1 kind=and inputs=A,B,C\n\
+                  NOT1 kind=not in=A\n\
+                  A kind=const value=1\n\
+                  B kind=const value=0\n\
+                  C kind=const value=1\n";
+    let System { blocks, .. } = build_system(source, Dialect::Ngspice).unwrap();
+    let and1 = blocks.iter().find(|b| b.name == "AND1").unwrap();
+    assert_eq!(and1.kind, BlockKind::LogicGate(LogicOp::And));
+    assert_eq!(and1.inputs.len(), 3);
+
+    let not1 = blocks.iter().find(|b| b.name == "NOT1").unwrap();
+    assert_eq!(not1.kind, BlockKind::LogicGate(LogicOp::Not));
+    assert_eq!(not1.inputs.len(), 1);
+}
+
+#[test]
+fn a_single_input_and_gate_is_a_clear_error_not_a_silent_pass_through() {
+    let source = "AND1 kind=and inputs=A\nA kind=const value=1\n";
+    let err = build_system(source, Dialect::Ngspice).unwrap_err();
+    assert!(err.contains("at least 2"), "error: {err}");
+}
+
+#[test]
+fn srlatch_parses_set_reset_inputs_and_defaults_to_set_priority() {
+    use continuous_blocks::LatchPriority;
+
+    let source = "FAULT kind=srlatch set=TRIP reset=CLR\n\
+                  TRIP kind=const value=0\n\
+                  CLR kind=const value=0\n";
+    let System { blocks, .. } = build_system(source, Dialect::Ngspice).unwrap();
+    let fault = blocks.iter().find(|b| b.name == "FAULT").unwrap();
+    assert_eq!(
+        fault.kind,
+        BlockKind::SrLatch {
+            priority: LatchPriority::Set
+        }
+    );
+    assert_eq!(fault.inputs.len(), 2);
+}
+
+#[test]
+fn dff_parses_clk_and_d_in_that_order() {
+    use continuous_blocks::FlipFlopKind;
+
+    let source = "Q kind=dff clk=CLK d=D\n\
+                  CLK kind=const value=0\n\
+                  D kind=const value=1\n";
+    let System { blocks, .. } = build_system(source, Dialect::Ngspice).unwrap();
+    let q = blocks.iter().find(|b| b.name == "Q").unwrap();
+    assert_eq!(
+        q.kind,
+        BlockKind::FlipFlop {
+            kind: FlipFlopKind::D,
+            reset: false
+        }
+    );
+    assert_eq!(
+        q.inputs,
+        vec![
+            Signal::Block("CLK".to_string()),
+            Signal::Block("D".to_string())
+        ]
+    );
+}
+
+#[test]
+fn counter_with_no_optional_fields_has_only_a_clk_input() {
+    let source = "CNT kind=counter clk=CLK\nCLK kind=const value=0\n";
+    let System { blocks, .. } = build_system(source, Dialect::Ngspice).unwrap();
+    let cnt = blocks.iter().find(|b| b.name == "CNT").unwrap();
+    assert_eq!(
+        cnt.kind,
+        BlockKind::Counter {
+            up_down: false,
+            modulus: None,
+            reset: false
+        }
+    );
+    assert_eq!(cnt.inputs.len(), 1);
+}
+
+#[test]
+fn counter_with_modulus_and_reset_declares_both_extra_inputs() {
+    let source = "CNT kind=counter clk=CLK modulus=10 reset=R\n\
+                  CLK kind=const value=0\n\
+                  R kind=const value=0\n";
+    let System { blocks, .. } = build_system(source, Dialect::Ngspice).unwrap();
+    let cnt = blocks.iter().find(|b| b.name == "CNT").unwrap();
+    assert_eq!(
+        cnt.kind,
+        BlockKind::Counter {
+            up_down: false,
+            modulus: Some(10),
+            reset: true
+        }
+    );
+    assert_eq!(cnt.inputs.len(), 2); // clk, reset (no up_down)
+}

@@ -7,7 +7,10 @@
 
 use std::collections::BTreeMap;
 
-use continuous_blocks::{CoordinateTransform, Hysteresis, Pid, StateSpace, TransferFunction, Vco};
+use continuous_blocks::{
+    CoordinateTransform, FlipFlopKind, Hysteresis, LatchPriority, LogicOp, Pid, StateSpace,
+    TransferFunction, Vco,
+};
 use general_spice_core::ast::Statement;
 use general_spice_core::dialect::Dialect;
 use general_spice_core::{lexer, parser};
@@ -843,6 +846,55 @@ fn build_kind(stmt: &general_spice_core::ast::BlockInstance) -> Result<Kind, Str
                 inputs: vec![parse_signal(&get_str("in")?)],
             })
         }
+        "srlatch" => {
+            let priority = match fields.get("priority") {
+                Some(s) => LatchPriority::from_name(s).ok_or_else(|| {
+                    format!(
+                        "line {}: device '{name}' field 'priority' must be 'set' or 'reset' \
+                         (got '{s}')",
+                        line_number + 1
+                    )
+                })?,
+                None => LatchPriority::Set,
+            };
+            Kind::Block(BlockInstance {
+                name: name.to_string(),
+                kind: BlockKind::SrLatch { priority },
+                inputs: vec![
+                    parse_signal(&get_str("set")?),
+                    parse_signal(&get_str("reset")?),
+                ],
+            })
+        }
+        "counter" => {
+            let modulus = match fields.get("modulus") {
+                Some(s) => Some(s.parse::<u32>().map_err(|_| {
+                    format!(
+                        "line {}: device '{name}' field 'modulus' is not a non-negative integer",
+                        line_number + 1
+                    )
+                })?),
+                None => None,
+            };
+            let mut inputs = vec![parse_signal(&get_str("clk")?)];
+            let up_down = fields.contains_key("up_down");
+            if up_down {
+                inputs.push(parse_signal(&get_str("up_down")?));
+            }
+            let reset = fields.contains_key("reset");
+            if reset {
+                inputs.push(parse_signal(&get_str("reset")?));
+            }
+            Kind::Block(BlockInstance {
+                name: name.to_string(),
+                kind: BlockKind::Counter {
+                    up_down,
+                    modulus,
+                    reset,
+                },
+                inputs,
+            })
+        }
         "cscript" => {
             let lib = std::path::PathBuf::from(get_str("lib")?);
             let output_names = match fields.get("outputs") {
@@ -1207,6 +1259,46 @@ fn build_kind(stmt: &general_spice_core::ast::BlockInstance) -> Result<Kind, Str
                         parse_signal(&get_str("in2")?),
                         parse_signal(&get_str("in3")?),
                     ],
+                })
+            } else if let Some(op) = LogicOp::from_name(other) {
+                let inputs = if op.is_unary() {
+                    vec![parse_signal(&get_str("in")?)]
+                } else {
+                    let list = get_str("inputs")?;
+                    let parsed: Vec<Signal> = list.split(',').map(parse_signal).collect();
+                    if parsed.len() < 2 {
+                        return Err(format!(
+                            "line {}: device '{name}': kind={other} needs at least 2 \
+                             comma-separated inputs= entries (got {})",
+                            line_number + 1,
+                            parsed.len()
+                        ));
+                    }
+                    parsed
+                };
+                Kind::Block(BlockInstance {
+                    name: name.to_string(),
+                    kind: BlockKind::LogicGate(op),
+                    inputs,
+                })
+            } else if let Some(kind) = FlipFlopKind::from_name(other) {
+                let mut inputs = vec![parse_signal(&get_str("clk")?)];
+                match kind {
+                    FlipFlopKind::D => inputs.push(parse_signal(&get_str("d")?)),
+                    FlipFlopKind::T => inputs.push(parse_signal(&get_str("t")?)),
+                    FlipFlopKind::Jk => {
+                        inputs.push(parse_signal(&get_str("j")?));
+                        inputs.push(parse_signal(&get_str("k")?));
+                    }
+                }
+                let reset = fields.contains_key("reset");
+                if reset {
+                    inputs.push(parse_signal(&get_str("reset")?));
+                }
+                Kind::Block(BlockInstance {
+                    name: name.to_string(),
+                    kind: BlockKind::FlipFlop { kind, reset },
+                    inputs,
                 })
             } else {
                 return Err(format!(

@@ -28,8 +28,8 @@
 use std::collections::BTreeMap;
 
 use continuous_blocks::{
-    CoordinateTransform, Hysteresis, MathFn1, MathFn2, MathFn3, Pid, Pmsm, StateSpace,
-    TransferFunction, Vco,
+    CoordinateTransform, FlipFlopKind, Hysteresis, LatchPriority, LogicOp, MathFn1, MathFn2,
+    MathFn3, Pid, Pmsm, StateSpace, TransferFunction, Vco,
 };
 
 use crate::{SwitchState, TransientFunction};
@@ -348,6 +348,38 @@ pub enum BlockKind {
     /// `Pid` feeding a [`BlockKind::Pwm`]). Its output is `1.0`/`0.0`, read directly by a
     /// [`GateBinding::Block`] rather than compared against a carrier.
     Hysteresis(Hysteresis),
+    /// A combinational logic gate — `kind=and`/`or`/`xor`/`nand`/`nor`/`xnor` (N-input, `N >=
+    /// 2`, `inputs=` in the netlist) or `kind=not` (exactly 1 input, `in=`). See
+    /// [`LogicOp::call`] for the reduction rule and `book/dev-guide/src/logic-signals.md`'s own
+    /// Category 1 for the design rationale, including why this revises (rather than contradicts
+    /// by oversight) `continuous_blocks::waveform_arithmetic`'s own documented exclusion of
+    /// boolean operators. Purely combinational — no persistent state, recomputed fresh every
+    /// step, the same as [`BlockKind::Sum`]/[`BlockKind::Gain`] already are.
+    LogicGate(LogicOp),
+    /// A level-triggered SR (set/reset) latch — `kind=srlatch`, `set=`/`reset=` inputs, no
+    /// clock. The one genuinely new state shape in this family (a single persisted `bool`,
+    /// updated every step from whichever of `set`/`reset` is currently asserted) — see
+    /// `logic-signals.md`'s own Category 2 for the `set`-vs-`reset`-dominant tie-break
+    /// `priority` resolves, and why `Set` (the default) is the right default for this block's
+    /// own motivating use case, a sticky fault latch.
+    SrLatch { priority: LatchPriority },
+    /// An edge-triggered flip-flop — `kind=dff`/`jkff`/`tff`. Unlike [`BlockKind::SrLatch`]
+    /// above, the next-state rule ([`FlipFlopKind::next_state`]) only fires at a detected rising
+    /// `clk` edge; `dae-runtime`'s own `BlockState` holds the flip-flop's own previous `clk`
+    /// sample alongside its output `q`, the bookkeeping a level-triggered latch doesn't need at
+    /// all. See `logic-signals.md`'s own Category 3.
+    FlipFlop { kind: FlipFlopKind, reset: bool },
+    /// A clocked up/down counter — `kind=counter`. `up_down`/`modulus`/`reset` are all optional
+    /// (`up_down` unset: always increments; `modulus` unset: free-running signed `i64`, wraps
+    /// only at `i64`'s own bounds; `reset` unset: no synchronous reset input at all). Shares the
+    /// same rising-edge-detection skeleton [`BlockKind::FlipFlop`] uses, generalized from a
+    /// single bit to an integer count — see `logic-signals.md`'s own Category 4 for why this is
+    /// one parameterized kind rather than separate `upcounter`/`downcounter`/`modcounter` kinds.
+    Counter {
+        up_down: bool,
+        modulus: Option<u32>,
+        reset: bool,
+    },
     /// A dynamically-loaded, user-supplied block (see [`cscript_ffi`]): `lib` is a precompiled
     /// shared library exporting `cscript_start`/`cscript_output`/(optionally)`cscript_free`/
     /// `cscript_clone`, filling `output_names.len()` outputs. Unlike every other `BlockKind`,
@@ -593,6 +625,10 @@ pub fn block_kind_name(kind: &BlockKind) -> &'static str {
         BlockKind::MathFn2(f) => f.name(),
         BlockKind::MathFn3(f) => f.name(),
         BlockKind::Hysteresis(_) => "hysteresis",
+        BlockKind::LogicGate(op) => op.name(),
+        BlockKind::SrLatch { .. } => "srlatch",
+        BlockKind::FlipFlop { kind, .. } => kind.name(),
+        BlockKind::Counter { .. } => "counter",
         BlockKind::CScript { .. } => "cscript",
         BlockKind::PyBlock { .. } => "pyblock",
         BlockKind::PyFunction { .. } => "pyfunc",
