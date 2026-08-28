@@ -619,65 +619,252 @@ pub enum BlockKind {
         /// The fixed-vs-dynamic anti-windup bound.
         clamp: PidClamp,
     },
-    /// An arbitrary continuous-time block given directly as its own `(A, B, C, D)` matrices — a
-    /// compensator/filter that doesn't already have a named convenience constructor, e.g. a
-    /// low-pass filter placed ahead of a `Pid` to damp a resonant plant. Genuinely MIMO: `B`'s
-    /// own column count (`StateSpace::inputs()`) and `C`'s own row count (`StateSpace::
-    /// outputs()`) are not constrained to `1` — a single-input single-output declaration (the
-    /// only shape this block supported before vector signals existed) is simply the `1x1` case,
-    /// unchanged. `outputs() == 1` produces a `SignalValue::Scalar`; `outputs() > 1` produces a
+    /// <!-- component -->
+    /// # State-Space
+    /// **Purpose:** an arbitrary continuous-time linear block given directly as `(A, B, C, D)`
+    /// matrices.
+    /// **Library:** Control / Continuous
+    ///
+    /// ## Description
+    /// A compensator/filter that doesn't already have a named convenience constructor, e.g. a
+    /// low-pass filter placed ahead of a `Pid` to damp a resonant plant:
+    /// $\dot{x} = Ax + Bu, \quad y = Cx + Du$. Genuinely MIMO: `B`'s own column count
+    /// (`StateSpace::inputs()`) and `C`'s own row count (`StateSpace::outputs()`) are not
+    /// constrained to `1` — a single-input single-output declaration is simply the `1x1` case.
+    /// `outputs() == 1` produces a `SignalValue::Scalar`; `outputs() > 1` produces a
     /// `SignalValue::Vector` of that length. Inputs are the flattened concatenation of this
-    /// block's own declared `Signal`s (scalar or vector, in order) — see
-    /// `evaluate_blocks`'/`dae-runtime`'s own input-flattening convention, shared with
+    /// block's own declared `Signal`s (scalar or vector, in order) — see `evaluate_blocks`'/
+    /// `dae-runtime`'s own input-flattening convention, shared with
     /// `CoordinateTransform`/`Pmsm`/`CScript`. No anti-windup (that's specifically a `Pid`
     /// output's own concern, not every dynamic block's); stepped forward unconditionally every
-    /// timestep via `StateSpace::rk4_step`.
+    /// timestep via `StateSpace::rk4_step` (RK4, not backward Euler — this block's own state is
+    /// never part of the circuit's own descriptor-DAE solve).
+    ///
+    /// ## Parameters
+    /// - `a=<matrix>` — the `n x n` dynamics matrix, e.g. `a=[[0,1],[-1,-1]]`.
+    /// - `b=<matrix|vector>` — `n x p` (`p` inputs); a flat vector (`b=[1,0]`) is SISO shorthand
+    ///   for `p=1`, matching the pre-vector-signals convention unchanged.
+    /// - `c=<matrix|vector>` — `q x n` (`q` outputs); same flat-vector SISO shorthand for `q=1`.
+    /// - `d=<matrix|scalar>` — optional, defaults to an all-zero `q x n` matrix; a bare scalar
+    ///   is only accepted when `q=1` and `p=1` (SISO) — a MIMO system must give the full matrix,
+    ///   since a lone scalar has no unambiguous placement in a larger `D`.
+    /// - `in=<signal>` (SISO, `p` must be `1`) or `inputs=<sig1,...>` (exactly `p` entries,
+    ///   each independently scalar or vector; the *flattened* total length must equal `p`,
+    ///   checked at evaluation time, not parse time, since a vector signal's own arity isn't
+    ///   knowable from netlist text alone).
+    ///
+    /// ## Errors
+    /// - `q != 1 || p != 1` with a bare scalar `d=` — rejected at parse time: `field 'd' is a
+    ///   bare scalar, but this system has <q> output(s) and <p> input(s) -- declare
+    ///   'd=[[...],...]' (<q>x<p>) for a MIMO system, a bare scalar is only valid for a 1x1
+    ///   (SISO) one`.
+    /// - There is no `e=` (descriptor-matrix) field exposed at the netlist level yet, so
+    ///   `StateSpaceError::NonInvertibleDescriptorMatrix` (a singular descriptor matrix) is
+    ///   currently unreachable through this parser — `e` is always `None` (ordinary,
+    ///   non-descriptor state-space) for every netlist-declared instance.
+    ///
+    /// ## Netlist form
+    /// ```text
+    /// NAME kind=statespace a=<matrix> b=<matrix|vector> c=<matrix|vector> [d=<matrix|scalar>] \
+    ///      (in=<signal> | inputs=<sig1,sig2,...>)
+    /// ```
+    ///
+    /// ## Example
+    /// A first-order low-pass ($\dot{x} = -x + u$, $y = x$, pole at $s=-1$) — verified end to
+    /// end, `SRC=1` settling toward `SS1=1`:
+    /// ```text
+    /// SRC kind=const value=1
+    /// SS1 kind=statespace a=[[-1]] b=[1] c=[1] in=SRC
+    /// ```
     StateSpace(StateSpace),
-    /// A single-input single-output block given as a rational `N(s)/D(s)` (numerator/
-    /// denominator coefficients, highest-degree first) rather than a `Pid`'s `Kp`/`Ki`/`Kd`
-    /// convenience parameterization — e.g. a hand-derived PID-with-filtered-derivative
-    /// compensator (`C(s) = Kp + Ki/s + Kd*N*s/(s+N)`, put over one denominator first: a pure
-    /// derivative term alone is non-causal/unrealizable, so every real PID, textbook or
-    /// otherwise, filters it — see [`Pid::to_transfer_function`]'s own doc comment for the
-    /// derivation). Compiled once via [`TransferFunction::to_state_space`]; no anti-windup, for
-    /// the same reason `StateSpace` above has none.
+    /// <!-- component -->
+    /// # Transfer Function
+    /// **Purpose:** a single-input single-output block given as a rational $N(s)/D(s)$.
+    /// **Library:** Control / Continuous
+    ///
+    /// ## Description
+    /// Numerator/denominator coefficients, highest-degree first, rather than a `Pid`'s
+    /// `Kp`/`Ki`/`Kd` convenience parameterization — e.g. a hand-derived PID-with-filtered-
+    /// derivative compensator ($C(s) = K_p + K_i/s + K_d N s/(s+N)$, put over one denominator
+    /// first: a pure derivative term alone is non-causal/unrealizable, so every real PID,
+    /// textbook or otherwise, filters it — see `continuous_blocks::Pid::to_transfer_function`'s
+    /// own doc comment for the derivation). Compiled once via
+    /// `TransferFunction::to_state_space` (controllable canonical form); no anti-windup, for
+    /// the same reason [`BlockKind::StateSpace`] above has none.
+    ///
+    /// ## Parameters
+    /// - `num=<vector>` — numerator coefficients, highest-degree first, e.g. `num=[1,2]` for
+    ///   $s + 2$.
+    /// - `den=<vector>` — denominator coefficients, highest-degree first, e.g. `den=[1,3,2]`
+    ///   for $s^2 + 3s + 2$. Must be non-empty and nonzero-leading; `deg(num) <= deg(den)`
+    ///   (a proper transfer function — every realizable continuous-time physical system is).
+    /// - `in=<signal>` — the single input (one input, always — this block is SISO by
+    ///   definition).
+    ///
+    /// ## Errors
+    /// - `den=[]` (empty) — rejected at parse time: `invalid transfer function
+    ///   (EmptyDenominator)`.
+    /// - `den`'s first (highest-degree) coefficient is `0.0` — rejected: `invalid transfer
+    ///   function (ZeroLeadingDenominatorCoefficient)` (a zero leading coefficient means the
+    ///   stated degree is a lie — the true denominator degree is lower).
+    /// - `deg(num) > deg(den)` (more numerator coefficients than denominator ones) — rejected:
+    ///   `invalid transfer function (ImproperTransferFunction)` — an improper transfer function
+    ///   has no causal realization.
+    ///
+    /// ## Netlist form
+    /// ```text
+    /// NAME kind=tf num=<vector> den=<vector> in=<signal>
+    /// ```
+    ///
+    /// ## Example
+    /// The same first-order low-pass as `StateSpace`'s own example ($1/(s+1)$), verified to
+    /// settle toward the same steady-state value:
+    /// ```text
+    /// SRC kind=const value=1
+    /// TF1 kind=tf num=[1] den=[1,1] in=SRC
+    /// ```
     TransferFunction(TransferFunction),
-    /// The discrete-domain counterpart to [`BlockKind::StateSpace`] above — `x[i+1] = A*x[i] +
-    /// B*u[i]`, `y[i] = C*x[i] + D*u[i]`, a plain linear recursion (no RK4, no `dt` at all): `A`/
-    /// `B`/`C`/`D` are already discrete-domain matrices, given directly by the netlist author,
-    /// not derived from continuous ones. `sample_time` is **required** here (unlike `cscript`'s
-    /// own optional field) and must be [`SampleTimeSpec::Periodic`] — a discrete system's own
-    /// dynamics *are* its sample period, there is no "continuous" fallback the way `None` means
-    /// for `cscript`, and `Variable` doesn't compose with a fixed-period recursion at all. See
-    /// `general-simulator`'s own `book/dev-guide/src/discrete-time-blocks.md`.
+    /// <!-- component -->
+    /// # Discrete State-Space
+    /// **Purpose:** the discrete-domain counterpart to `StateSpace` — a plain linear recursion.
+    /// **Library:** Control / Discrete
+    ///
+    /// ## Description
+    /// $x_{i+1} = Ax_i + Bu_i$, $y_i = Cx_i + Du_i$ — no RK4, no `dt` at all: `A`/`B`/`C`/`D`
+    /// are already discrete-domain matrices, given directly by the netlist author, not derived
+    /// from continuous ones. `sample_time` is **required** here (unlike `cscript`'s own
+    /// optional field) and must be periodic — a discrete system's own dynamics *are* its
+    /// sample period, there is no "continuous" fallback the way omitting it means for
+    /// `cscript`, and a solver-chosen variable schedule doesn't compose with a fixed-period
+    /// recursion at all. See `general-simulator`'s own `book/dev-guide/src/discrete-time-blocks.md`.
+    ///
+    /// ## Parameters
+    /// - `a=`/`b=`/`c=`/`d=`/`in=`/`inputs=` — identical shape and MIMO rules to
+    ///   [`BlockKind::StateSpace`]'s own Parameters (see there); the only difference is these
+    ///   matrices are already discrete-domain.
+    /// - `ts=<f64>` / `freq=<f64>` (with optional `to=<f64>` offset) — required; unlike
+    ///   `cscript`, `ts=variable` is not accepted here (see Errors).
+    ///
+    /// ## Errors
+    /// - Same MIMO scalar-`d` rejection as `StateSpace` (see there).
+    /// - `ts=`/`freq=` missing entirely — rejected at parse time: `missing 'ts=' or 'freq='
+    ///   -- a discrete-time block's own sample period is not optional (its dynamics *are* that
+    ///   period), unlike the optional 'ts='/'freq=' on kind=cscript/pyblock/pyfunc`.
+    /// - `ts=variable` — rejected at parse time: `ts=variable is not available here -- a
+    ///   discrete block's own recursion has its coefficients baked in at one fixed sample
+    ///   period, which 'the block decides its own next execution time' doesn't compose with`.
+    ///
+    /// ## Netlist form
+    /// ```text
+    /// NAME kind=discretestatespace a=<matrix> b=<matrix|vector> c=<matrix|vector> \
+    ///      [d=<matrix|scalar>] (ts=<f64> | freq=<f64> [to=<f64>]) \
+    ///      (in=<signal> | inputs=<sig1,sig2,...>)
+    /// ```
+    ///
+    /// ## Example
+    /// A discrete integrator ($x_{i+1} = x_i + 0.1 \cdot u_i$, $y=x$, `ts=0.1`) fed a constant
+    /// `1` — verified end to end, `DS1` reaching `0.5` after 5 sample hits ($5 \times 0.1$):
+    /// ```text
+    /// SRC kind=const value=1
+    /// DS1 kind=discretestatespace a=[[1]] b=[0.1] c=[1] ts=0.1 in=SRC
+    /// ```
     DiscreteStateSpace {
         /// The discrete-domain `A`/`B`/`C`/`D` matrices.
         ss: StateSpace,
         /// Must be [`SampleTimeSpec::Periodic`] — a discrete system's dynamics are its sample period.
         sample_time: SampleTimeSpec,
     },
-    /// The discrete-domain counterpart to [`BlockKind::TransferFunction`] above — `Y(z)/U(z) =
-    /// N(z)/D(z)`, coefficients already in the `z`-domain. Realized via the exact same
-    /// [`TransferFunction::to_state_space`] the continuous version uses (coefficient-to-
+    /// <!-- component -->
+    /// # Discrete Transfer Function
+    /// **Purpose:** the discrete-domain counterpart to `Transfer Function` — $Y(z)/U(z) = N(z)/D(z)$.
+    /// **Library:** Control / Discrete
+    ///
+    /// ## Description
+    /// Coefficients already in the $z$-domain. Realized via the exact same
+    /// `TransferFunction::to_state_space` the continuous version uses (coefficient-to-
     /// companion-form conversion is domain-agnostic algebra — it doesn't know or care whether
-    /// the variable is called `s` or `z`), evaluated via [`StateSpace::discrete_step`] instead
-    /// of `rk4_step`. Same mandatory-`Periodic`-`sample_time` rule as `DiscreteStateSpace`.
+    /// the variable is called $s$ or $z$), evaluated via `StateSpace::discrete_step` instead of
+    /// `rk4_step`. Same mandatory-periodic-`sample_time` rule as [`BlockKind::DiscreteStateSpace`].
+    ///
+    /// ## Parameters
+    /// - `num=`/`den=`/`in=` — identical shape and validity rules to
+    ///   [`BlockKind::TransferFunction`]'s own Parameters (see there); coefficients are already
+    ///   in the $z$-domain rather than $s$.
+    /// - `ts=<f64>` / `freq=<f64>` (with optional `to=<f64>`) — required, same rule as
+    ///   `DiscreteStateSpace`.
+    ///
+    /// ## Errors
+    /// Identical to [`BlockKind::TransferFunction`]'s own (`EmptyDenominator`,
+    /// `ZeroLeadingDenominatorCoefficient`, `ImproperTransferFunction`), plus the same
+    /// missing-`ts=`/`ts=variable`-rejected errors as `DiscreteStateSpace`.
+    ///
+    /// ## Netlist form
+    /// ```text
+    /// NAME kind=discretetf num=<vector> den=<vector> (ts=<f64> | freq=<f64> [to=<f64>]) in=<signal>
+    /// ```
+    ///
+    /// ## Example
+    /// The exact $z$-domain realization of `DiscreteStateSpace`'s own example above ($Y(z)/U(z)
+    /// = 0.1/(z-1)$, a discrete integrator) — verified to reach the same `DTF1=0.5` after 5
+    /// sample hits:
+    /// ```text
+    /// SRC kind=const value=1
+    /// DTF1 kind=discretetf num=[0.1] den=[1,-1] ts=0.1 in=SRC
+    /// ```
     DiscreteTransferFunction {
         /// The `z`-domain numerator/denominator coefficients.
         tf: TransferFunction,
         /// Must be [`SampleTimeSpec::Periodic`].
         sample_time: SampleTimeSpec,
     },
-    /// The discrete-domain counterpart to [`BlockKind::Pid`] above — reuses the exact same
-    /// [`PidClamp`] anti-windup mechanism, but the integral/derivative actions advance once per
-    /// declared sample period via [`continuous_blocks::DiscretePid::step`] instead of RK4-
-    /// integrating continuously. Not built by converting to one combined `z`-domain transfer
-    /// function and back — realized directly from the block's own diagram (three parallel
-    /// branches, summed); see `discrete-time-blocks.md`'s own Category 3 for the full
-    /// derivation, including the docling-reading-order correction it depended on. Same
-    /// mandatory-`Periodic`-`sample_time` rule as `DiscreteStateSpace`/`DiscreteTransferFunction`
-    /// above — `DiscretePid`'s own `period` field is set *from* this same `sample_time`, not a
+    /// <!-- component -->
+    /// # Discrete PID Controller
+    /// **Purpose:** the discrete-domain counterpart to `PID Controller`.
+    /// **Library:** Control / Discrete
+    ///
+    /// ## Description
+    /// Reuses the exact same [`PidClamp`] anti-windup mechanism as [`BlockKind::Pid`], but the
+    /// integral/derivative actions advance once per declared sample period via
+    /// `continuous_blocks::DiscretePid::step` instead of RK4-integrating continuously. Not
+    /// built by converting to one combined $z$-domain transfer function and back — realized
+    /// directly from the block's own diagram (three parallel branches, summed). Same
+    /// mandatory-periodic-`sample_time` rule as `DiscreteStateSpace`/`DiscreteTransferFunction`
+    /// above — this block's own integration `period` is set *from* `sample_time`, not a
     /// separately-entered value.
+    ///
+    /// ## Parameters
+    /// - `in=<signal>`, `kp=`/`ki=`/`kd=`/`n=`, and the fixed-vs-dynamic clamp fields
+    ///   (`clamp_lo=`/`clamp_hi=` or `clamp_lo_in=`/`clamp_hi_in=`) — identical meaning to
+    ///   [`BlockKind::Pid`]'s own Parameters (see there).
+    /// - `ts=<f64>` / `freq=<f64>` (with optional `to=<f64>`) — required.
+    /// - `integration_method=<forward|backward|trapezoidal>` — optional, defaults to
+    ///   `forward` (forward Euler); selects the discrete integration rule the integral term
+    ///   uses each sample period.
+    ///
+    /// ## Errors
+    /// - Same `n <= 0.0` and clamp-pairing errors as [`BlockKind::Pid`] (see there).
+    /// - Same missing-`ts=`/`ts=variable`-rejected errors as `DiscreteStateSpace`.
+    /// - `integration_method` present but not one of the three known names — rejected at parse
+    ///   time: `unknown integration_method '<value>' (expected 'forward', 'backward', or
+    ///   'trapezoidal')`.
+    ///
+    /// ## Netlist form
+    /// ```text
+    /// NAME kind=discretepid in=<signal> kp=<f64> ki=<f64> kd=<f64> n=<f64> \
+    ///      (ts=<f64> | freq=<f64> [to=<f64>]) \
+    ///      (clamp_lo=<f64> clamp_hi=<f64> | clamp_lo_in=<signal> clamp_hi_in=<signal>) \
+    ///      [integration_method=<forward|backward|trapezoidal>]
+    /// ```
+    ///
+    /// ## Example
+    /// A discrete PI (no derivative action) sampled every 0.1 s, integrating a fixed error
+    /// signal once per sample hit — verified end to end, `DPID1` stepping `0.5 -> 0.525 -> 0.55
+    /// -> 0.575 -> 0.6` at each `ts=0.1` boundary (unchanged between hits, matching the
+    /// discrete-recursion contract exactly):
+    /// ```text
+    /// ERR kind=const value=0.5
+    /// DPID1 kind=discretepid in=ERR kp=1 ki=0.5 kd=0 n=1 ts=0.1 clamp_lo=-1 clamp_hi=1
+    /// ```
     DiscretePid {
         /// The compiled discrete PID gains/state.
         pid: DiscretePid,
@@ -686,23 +873,82 @@ pub enum BlockKind {
         /// Must be [`SampleTimeSpec::Periodic`]; also sets `pid`'s own `period`.
         sample_time: SampleTimeSpec,
     },
-    /// A voltage-controlled oscillator (see [`Vco`]) — a bare, standalone oscillator producing
-    /// a `[0, 1)` ramp, still useful on its own (a raw frequency-to-ramp conversion for
-    /// something other than gate control). Not how a gate-driving PWM modulator gets its own
-    /// switching frequency, though — see [`BlockKind::Pwm`]/[`BlockKind::PhaseShiftPwm`] below,
-    /// PWM Modulator 1/2, neither of which reads this block at all.
+    /// <!-- component -->
+    /// # VCO (Voltage-Controlled Oscillator)
+    /// **Purpose:** a bare, standalone oscillator producing a `[0, 1)` ramp from a frequency input.
+    /// **Library:** Control / Continuous
+    ///
+    /// ## Description
+    /// A raw frequency-to-ramp conversion, still useful on its own outside gate-driving PWM —
+    /// e.g. feeding a `MathFn1::Sin`/`Gain` chain to build a variable-frequency sinusoidal
+    /// reference. Not how a gate-driving PWM modulator gets its own switching frequency, though
+    /// — see [`BlockKind::Pwm`]/[`BlockKind::PhaseShiftPwm`] below, neither of which reads this
+    /// block at all (each owns its own internal oscillator).
+    ///
+    /// ## Parameters
+    /// - `f_min=<f64>`, `f_max=<f64>` — the frequency clamp range, Hz; the one input (`in=`) is
+    ///   internally clamped to `[f_min, f_max]` before integration.
+    /// - `in=<signal>` — the frequency command, Hz (one input).
+    ///
+    /// ## Errors
+    /// - `f_min > f_max` — rejected at parse time: `invalid vco (FMinExceedsFMax)`.
+    ///
+    /// ## Netlist form
+    /// ```text
+    /// NAME kind=vco f_min=<f64> f_max=<f64> in=<signal>
+    /// ```
+    ///
+    /// ## Example
+    /// A fixed 10 Hz oscillator, verified to produce a `[0,1)` ramp (not stuck at a constant):
+    /// ```text
+    /// FREQ kind=const value=10
+    /// VCO1 kind=vco f_min=1 f_max=1000 in=FREQ
+    /// ```
     Vco(Vco),
-    /// **PWM Modulator 1**: fixed-frequency, duty-driven, **active-high complementary** PWM.
+    /// <!-- component -->
+    /// # PWM Modulator 1
+    /// **Purpose:** fixed-frequency, duty-driven, active-high complementary PWM.
+    /// **Library:** Power Electronics
+    ///
+    /// ## Description
     /// One input, `duty` (`[0,1]`, clamped, read fresh every step from anywhere in the graph —
     /// a `Pid`, a filtered `TransferFunction`, a plain `Const`...), fixed carrier frequency
     /// `freq_hz`. Two outputs, following the [`BlockKind::CScript`] `output_names` convention:
     /// `output_names[0]` (aliasing this block's own `.name`) is the main signal, `output_names[1]`
-    /// its active-high complement — the fusion of what used to be two separate `GateBinding`
-    /// variants (`Pwm`/`PwmComplement`) into one component, per explicit request. `red`/`fed`
-    /// (seconds) are independent per-edge dead-time delays — see
-    /// `math_ops::complementary_pwm_with_deadtime` (in `dae-runtime`) for the exact rising-edge-only-delay
-    /// semantics and why `red=fed=0.0` recovers the ideal, gap-free, overlap-free pair exactly.
-    /// Stateless: a pure function of `(t, duty)` every step, no internal oscillator.
+    /// its active-high complement. `red`/`fed` (seconds) are independent per-edge dead-time
+    /// delays — see `math_ops::complementary_pwm_with_deadtime` (in `dae-runtime`) for the
+    /// exact rising-edge-only-delay semantics and why `red=fed=0.0` recovers the ideal,
+    /// gap-free, overlap-free pair exactly. Stateless: a pure function of `(t, duty)` every
+    /// step, no internal oscillator.
+    ///
+    /// ## Parameters
+    /// - `freq=<f64>` — fixed carrier frequency, Hz.
+    /// - `in=<signal>` — the duty command, `[0,1]` (clamped internally; no error for a value
+    ///   outside that range).
+    /// - `red=<f64>`, `fed=<f64>` — optional, default `0.0`; rising/falling-edge dead time,
+    ///   seconds.
+    /// - `outputs=<main,complement>` — optional; defaults to `<name>,<name>_comp`. Exactly 2
+    ///   entries if given.
+    ///
+    /// ## Errors
+    /// - `outputs=` with a count other than 2 — rejected at parse time: `'outputs' needs
+    ///   exactly 2 entries (main, complement; got <n>)`.
+    /// - `red=`/`fed=` present but not a number — the generic `field '<key>' is not a number`
+    ///   error.
+    ///
+    /// ## Netlist form
+    /// ```text
+    /// NAME kind=pwm freq=<f64> in=<signal> [red=<f64>] [fed=<f64>] [outputs=<main,complement>]
+    /// ```
+    ///
+    /// ## Example
+    /// A 10 kHz, 30% duty modulator with no dead time — verified end to end: `PWM1` high
+    /// (`>= 0.99`) for the first ~30% of each 100 µs period and its complement exactly
+    /// inverted, `PWM1 + PWM1_comp == 1` at every sampled instant:
+    /// ```text
+    /// DUTY kind=const value=0.3
+    /// PWM1 kind=pwm freq=10000 in=DUTY
+    /// ```
     Pwm {
         /// Fixed carrier frequency, Hz.
         freq_hz: f64,
@@ -713,24 +959,57 @@ pub enum BlockKind {
         /// `[main, complement]` output names.
         output_names: Vec<String>,
     },
-    /// **PWM Modulator 2**: frequency+phase+duty-driven, **active-high complementary** PWM —
-    /// the fusion of what used to be two separate `GateBinding` variants (`Vco`/`VcoPhase`)
-    /// plus a block-driven `duty` neither had, again with the same dead-time/complementary-
-    /// output treatment as [`BlockKind::Pwm`]. This is *not* a variant of [`BlockKind::Vco`] —
-    /// it owns its own frequency-integration state directly (`osc` reuses [`Vco`]'s own
-    /// clamp-and-integrate math purely as an implementation detail, the same formula, not a
-    /// shared block reference), so two instances fed the *same* `freq` input stay bit-for-bit
-    /// phase-synchronized (deterministic integration, same `dt`, same starting phase `0.0`),
-    /// the way e.g. a dual-active-bridge's two legs need to be, without a separately-declared
-    /// shared oscillator block in between. Three inputs, in order: `freq` (Hz, clamped
-    /// internally to `[osc.f_min, osc.f_max]`), `phase` (`[0,1)`, a phase-shift command as a
-    /// fraction of one carrier period — *not* this block's own internal integration state, a
-    /// different thing), `duty` (`[0,1]`, clamped). `red`/`fed` are in seconds, exactly like
-    /// [`BlockKind::Pwm`]'s own, but converted to a phase fraction using *this step's own*
-    /// resolved frequency (not a fixed constant) — this matters for a variable-frequency
-    /// converter, since the same absolute dead time eats a larger fraction of the period at
-    /// higher switching frequency, a real effect on e.g. a resonant converter's own ZVS margin,
-    /// not just bookkeeping.
+    /// <!-- component -->
+    /// # PWM Modulator 2 (Phase-Shift PWM)
+    /// **Purpose:** frequency+phase+duty-driven, active-high complementary PWM with its own
+    /// internal oscillator.
+    /// **Library:** Power Electronics
+    ///
+    /// ## Description
+    /// This is *not* a variant of [`BlockKind::Vco`] — it owns its own frequency-integration
+    /// state directly (`osc` reuses [`Vco`]'s own clamp-and-integrate math purely as an
+    /// implementation detail, the same formula, not a shared block reference), so two instances
+    /// fed the *same* `freq` input stay bit-for-bit phase-synchronized (deterministic
+    /// integration, same `dt`, same starting phase `0.0`), the way e.g. a dual-active-bridge's
+    /// two legs need to be, without a separately-declared shared oscillator block in between.
+    /// `red`/`fed` are in seconds, exactly like [`BlockKind::Pwm`]'s own, but converted to a
+    /// phase fraction using *this step's own* resolved frequency (not a fixed constant) — this
+    /// matters for a variable-frequency converter, since the same absolute dead time eats a
+    /// larger fraction of the period at higher switching frequency, a real effect on e.g. a
+    /// resonant converter's own ZVS margin, not just bookkeeping.
+    ///
+    /// ## Parameters
+    /// - `f_min=<f64>`, `f_max=<f64>` — the internal oscillator's frequency clamp range, Hz.
+    /// - `inputs=<freq,phase,duty>` — exactly 3, in this order: `freq` (Hz, clamped internally
+    ///   to `[f_min, f_max]`), `phase` (`[0,1)`, a phase-shift command as a fraction of one
+    ///   carrier period — *not* this block's own internal integration state, a different
+    ///   thing), `duty` (`[0,1]`, clamped).
+    /// - `red=<f64>`, `fed=<f64>` — optional, default `0.0`; seconds, converted internally to a
+    ///   phase fraction using the current resolved frequency.
+    /// - `outputs=<main,complement>` — optional; defaults to `<name>,<name>_comp`.
+    ///
+    /// ## Errors
+    /// - `inputs=` with a count other than 3 — rejected at parse time: `kind='pspwm' needs 3
+    ///   inputs (freq,phase,duty; got <n>)`.
+    /// - `f_min > f_max` — rejected at parse time: `invalid pspwm oscillator
+    ///   (FMinExceedsFMax)`.
+    /// - `outputs=` with a count other than 2 — same error as [`BlockKind::Pwm`]'s own.
+    ///
+    /// ## Netlist form
+    /// ```text
+    /// NAME kind=pspwm f_min=<f64> f_max=<f64> inputs=<freq_signal,phase_signal,duty_signal> \
+    ///      [red=<f64>] [fed=<f64>] [outputs=<main,complement>]
+    /// ```
+    ///
+    /// ## Example
+    /// A 10 kHz, zero-phase-shift, 40% duty modulator — verified end to end: both outputs
+    /// `[0,1]`-valued, `PSPWM1 + PSPWM1_comp == 1` at every sampled instant:
+    /// ```text
+    /// FREQ kind=const value=10000
+    /// PHASE kind=const value=0
+    /// DUTY kind=const value=0.4
+    /// PSPWM1 kind=pspwm f_min=1000 f_max=50000 inputs=FREQ,PHASE,DUTY
+    /// ```
     PhaseShiftPwm {
         /// The internal frequency-integrating oscillator.
         osc: Vco,
@@ -1032,46 +1311,199 @@ pub enum BlockKind {
     /// L kind=limit in1=V in2=LO in3=HI
     /// ```
     MathFn3(MathFn3),
-    /// A Schmitt-trigger comparator (see [`Hysteresis`]) — bang-bang/hysteresis-band control,
-    /// used when there's no fixed switching frequency to modulate a duty command onto (unlike
-    /// `Pid` feeding a [`BlockKind::Pwm`]). Its output is `1.0`/`0.0`, read directly by a
-    /// [`GateBinding::Block`] rather than compared against a carrier.
+    /// <!-- component -->
+    /// # Hysteresis (Schmitt Trigger)
+    /// **Purpose:** a bang-bang/hysteresis-band comparator.
+    /// **Library:** Logic
+    ///
+    /// ## Description
+    /// Stays HIGH until the input drops below `low`, stays LOW until the input rises above
+    /// `high` (see `continuous_blocks::Hysteresis`) — used for current-mode control when
+    /// there's no fixed switching frequency to modulate a duty command onto (unlike `Pid`
+    /// feeding a [`BlockKind::Pwm`]). Its output is `1.0`/`0.0`, read directly by a
+    /// [`GateBinding::Block`] rather than compared against a carrier. Deliberately not a
+    /// `StateSpace`: the on/off memory is a genuine discrete latch, not a linear dynamic.
+    ///
+    /// ## Parameters
+    /// - `high=<f64>`, `low=<f64>` — the two switching thresholds; must satisfy `low <= high`.
+    /// - `in=<signal>` — the input signal (one input).
+    ///
+    /// ## Errors
+    /// - `low > high` — rejected at parse time: `invalid hysteresis (LowExceedsHigh)`.
+    ///
+    /// ## Netlist form
+    /// ```text
+    /// NAME kind=hysteresis high=<f64> low=<f64> in=<signal>
+    /// ```
+    ///
+    /// ## Example
+    /// A `[-1, 1]` band, verified end to end: a rising `Time`-driven ramp is LOW until crossing
+    /// `1`, then HIGH:
+    /// ```text
+    /// T kind=time
+    /// RAMP kind=gain k=1 in=T
+    /// HYST1 kind=hysteresis high=1 low=-1 in=RAMP
+    /// ```
     Hysteresis(Hysteresis),
-    /// A combinational logic gate — `kind=and`/`or`/`xor`/`nand`/`nor`/`xnor` (N-input, `N >=
-    /// 2`, `inputs=` in the netlist) or `kind=not` (exactly 1 input, `in=`). See
-    /// [`LogicOp::call`] for the reduction rule and `book/dev-guide/src/logic-signals.md`'s own
-    /// Category 1 for the design rationale, including why this revises (rather than contradicts
-    /// by oversight) `continuous_blocks::waveform_arithmetic`'s own documented exclusion of
-    /// boolean operators. Purely combinational — no persistent state, recomputed fresh every
-    /// step, the same as [`BlockKind::Sum`]/[`BlockKind::Gain`] already are.
+    /// <!-- component -->
+    /// # Logic Gate
+    /// **Purpose:** a combinational digital logic gate.
+    /// **Library:** Logic
+    ///
+    /// ## Description
+    /// `and`/`or`/`xor`/`nand`/`nor`/`xnor` (N-input, `N >= 2`) or `not` (exactly 1 input) —
+    /// see `continuous_blocks::LogicOp::call` for the exact reduction rule (`Xor`/`Xnor` use the
+    /// standard N-input generalization: true iff an odd/even number of inputs are true, not
+    /// "exactly one"). Every input/output is an ordinary `f64` signal, thresholded at `>= 0.5`
+    /// — the same convention `GateBinding`/[`BlockKind::Hysteresis`] already use; there is no
+    /// dedicated boolean `SignalValue` variant anywhere in this crate. Purely combinational —
+    /// no persistent state, recomputed fresh every step, the same as
+    /// [`BlockKind::Sum`]/[`BlockKind::Gain`] already are.
+    ///
+    /// ## Parameters
+    /// - `kind=<and|or|xor|nand|nor|xnor|not>` — which gate.
+    /// - `inputs=<sig1,sig2,...>` — for every kind except `not`; at least 2 entries.
+    /// - `in=<signal>` — for `kind=not` only; exactly 1 input.
+    ///
+    /// ## Errors
+    /// - `and`/`or`/`xor`/`nand`/`nor`/`xnor` with fewer than 2 `inputs=` entries — rejected at
+    ///   parse time: `kind=<name> needs at least 2 comma-separated inputs= entries (got <n>)`.
+    ///
+    /// ## Netlist form
+    /// ```text
+    /// NAME kind=<and|or|xor|nand|nor|xnor> inputs=<sig1,sig2,...>
+    /// NAME kind=not in=<signal>
+    /// ```
+    ///
+    /// ## Example
+    /// A 2-input `and`, verified end to end (`1 and 0 = 0`, `1 and 1 = 1`):
+    /// ```text
+    /// A kind=const value=1
+    /// B kind=const value=0
+    /// G1 kind=and inputs=A,B
+    /// ```
     LogicGate(LogicOp),
-    /// A level-triggered SR (set/reset) latch — `kind=srlatch`, `set=`/`reset=` inputs, no
-    /// clock. The one genuinely new state shape in this family (a single persisted `bool`,
-    /// updated every step from whichever of `set`/`reset` is currently asserted) — see
-    /// `logic-signals.md`'s own Category 2 for the `set`-vs-`reset`-dominant tie-break
-    /// `priority` resolves, and why `Set` (the default) is the right default for this block's
-    /// own motivating use case, a sticky fault latch.
+    /// <!-- component -->
+    /// # SR Latch
+    /// **Purpose:** a level-triggered set/reset latch.
+    /// **Library:** Logic
+    ///
+    /// ## Description
+    /// No clock — `set`/`reset` act every step, immediately. The one genuinely new state shape
+    /// in this family (a single persisted `bool`, updated every step from whichever of
+    /// `set`/`reset` is currently asserted — see `continuous_blocks::srlatch_next`):
+    /// `set,reset -> q_next`: `false,false` holds; `true,false` sets `true`; `false,true` sets
+    /// `false`; `true,true` (both at once) resolves per `priority`. `Set` (the default) is the
+    /// right default for this block's own motivating use case, a sticky fault latch — a fault
+    /// occurring in the same step a reset is asserted should still latch, not silently clear.
+    ///
+    /// ## Parameters
+    /// - `set=<signal>`, `reset=<signal>` — both required.
+    /// - `priority=<set|reset>` — optional, defaults to `set`; which input wins when both are
+    ///   asserted simultaneously.
+    ///
+    /// ## Errors
+    /// - `priority=` present but not `set`/`reset` — rejected at parse time: `field 'priority'
+    ///   must be 'set' or 'reset' (got '<value>')`.
+    ///
+    /// ## Netlist form
+    /// ```text
+    /// NAME kind=srlatch set=<signal> reset=<signal> [priority=<set|reset>]
+    /// ```
+    ///
+    /// ## Example
+    /// A fault latch, verified end to end: `FAULT` pulses to `1` briefly then returns to `0`
+    /// at `t=0.1`, but `LATCH1` stays `1` afterward (no separate reset asserted):
+    /// ```text
+    /// FAULT kind=pwc points=[[0,1],[0.1,0]]
+    /// CLEAR kind=const value=0
+    /// LATCH1 kind=srlatch set=FAULT reset=CLEAR
+    /// ```
     SrLatch {
         /// Which input wins when `set` and `reset` are asserted simultaneously.
         priority: LatchPriority,
     },
-    /// An edge-triggered flip-flop — `kind=dff`/`jkff`/`tff`. Unlike [`BlockKind::SrLatch`]
-    /// above, the next-state rule ([`FlipFlopKind::next_state`]) only fires at a detected rising
-    /// `clk` edge; `dae-runtime`'s own `BlockState` holds the flip-flop's own previous `clk`
-    /// sample alongside its output `q`, the bookkeeping a level-triggered latch doesn't need at
-    /// all. See `logic-signals.md`'s own Category 3.
+    /// <!-- component -->
+    /// # Flip-Flop
+    /// **Purpose:** an edge-triggered D/JK/T flip-flop.
+    /// **Library:** Logic
+    ///
+    /// ## Description
+    /// Unlike [`BlockKind::SrLatch`] above, the next-state rule only fires at a detected rising
+    /// `clk` edge (`continuous_blocks::rising_edge`); the previous `clk` sample is held
+    /// alongside the output `q` between edges, the bookkeeping a level-triggered latch doesn't
+    /// need at all.
+    ///
+    /// ## Parameters
+    /// - `kind=<dff|jkff|tff>` — which flip-flop.
+    /// - `clk=<signal>` — the clock input, required for every kind.
+    /// - `d=<signal>` — for `kind=dff` only: the data input.
+    /// - `t=<signal>` — for `kind=tff` only: the toggle-enable input.
+    /// - `j=<signal>`, `k=<signal>` — for `kind=jkff` only: both required.
+    /// - `reset=<signal>` — optional; if given, declares a synchronous reset input.
+    ///
+    /// ## Errors
+    /// - The kind-specific data input (`d=`/`t=`/`j=`+`k=`) missing for its own kind — the
+    ///   generic `missing field '<key>'` error.
+    ///
+    /// ## Netlist form
+    /// ```text
+    /// NAME kind=dff clk=<signal> d=<signal> [reset=<signal>]
+    /// NAME kind=tff clk=<signal> t=<signal> [reset=<signal>]
+    /// NAME kind=jkff clk=<signal> j=<signal> k=<signal> [reset=<signal>]
+    /// ```
+    ///
+    /// ## Example
+    /// A D flip-flop, verified end to end: `Q1` only updates to `D`'s current value at a clock
+    /// rising edge, not continuously:
+    /// ```text
+    /// CLK kind=pwc points=[[0,0],[5e-3,1]]
+    /// D kind=const value=1
+    /// Q1 kind=dff clk=CLK d=D
+    /// ```
     FlipFlop {
         /// `dff`/`jkff`/`tff`.
         kind: FlipFlopKind,
         /// Whether this instance declares a synchronous reset input.
         reset: bool,
     },
-    /// A clocked up/down counter — `kind=counter`. `up_down`/`modulus`/`reset` are all optional
-    /// (`up_down` unset: always increments; `modulus` unset: free-running signed `i64`, wraps
-    /// only at `i64`'s own bounds; `reset` unset: no synchronous reset input at all). Shares the
-    /// same rising-edge-detection skeleton [`BlockKind::FlipFlop`] uses, generalized from a
-    /// single bit to an integer count — see `logic-signals.md`'s own Category 4 for why this is
-    /// one parameterized kind rather than separate `upcounter`/`downcounter`/`modcounter` kinds.
+    /// <!-- component -->
+    /// # Counter
+    /// **Purpose:** a clocked up/down counter.
+    /// **Library:** Logic
+    ///
+    /// ## Description
+    /// Shares the same rising-edge-detection skeleton [`BlockKind::FlipFlop`] uses, generalized
+    /// from a single bit to an integer count. `up_down`/`modulus`/`reset` are all optional:
+    /// omitting `up_down` always increments; omitting `modulus` gives a free-running signed
+    /// `i64` that wraps only at `i64`'s own bounds; omitting `reset` means no synchronous reset
+    /// input at all.
+    ///
+    /// ## Parameters
+    /// - `clk=<signal>` — the clock input, required.
+    /// - `up_down=<signal>` — optional; if given, declares a direction input (counts down when
+    ///   its value thresholds true, up otherwise).
+    /// - `modulus=<u32>` — optional; wraps the count into `[0, modulus)` if given.
+    /// - `reset=<signal>` — optional; if given, declares a synchronous reset input.
+    ///
+    /// ## Errors
+    /// - `modulus=` present but not a non-negative integer — rejected at parse time: `field
+    ///   'modulus' is not a non-negative integer`.
+    /// - `up_down=`/`reset=` declared (field present) but the signal itself malformed — the
+    ///   generic `missing field '<key>'`/parse-signal errors.
+    ///
+    /// ## Netlist form
+    /// ```text
+    /// NAME kind=counter clk=<signal> [up_down=<signal>] [modulus=<u32>] [reset=<signal>]
+    /// ```
+    ///
+    /// ## Example
+    /// A free-running up counter clocked by a repeating pulse train — verified end to end,
+    /// `CNT1` increasing by exactly `1` at each detected clock rising edge:
+    /// ```text
+    /// CLK kind=pwc points=[[0,0],[1e-3,1],[2e-3,0]] repeat=true
+    /// CNT1 kind=counter clk=CLK
+    /// ```
     Counter {
         /// Whether this instance declares an up/down direction input (unset: always increments).
         up_down: bool,
@@ -1325,85 +1757,238 @@ pub enum BlockKind {
         /// `None` runs every resolved circuit step; `Some` must be [`SampleTimeSpec::Periodic`].
         sample_time: Option<SampleTimeSpec>,
     },
-    /// One of the six Clarke/Park coordinate transforms (see
-    /// [`continuous_blocks::CoordinateTransform`]) — the standard `abc`/`alpha-beta-0`/`d-q-0`
-    /// change of basis used to regulate a three-phase quantity (grid-tied PFC, motor drive) with
-    /// a `Pid` on a DC-like `d`/`q` value instead of chasing a sine wave directly. Stateless and
-    /// multi-output, following exactly the same `output_names` convention [`BlockKind::CScript`]
-    /// established: `inputs` supplies `kind.input_count()` values in the order
-    /// [`CoordinateTransform::call`] expects, `output_names.len()` must equal 3 (this family's
-    /// output count — see [`CoordinateTransform::output_names`] for the conventional per-
-    /// transform names, e.g. `["alpha", "beta", "zero"]` for `Clarke`), the block's own `.name`
-    /// binds to the first (primary) output, and the remaining two are inserted under their own
-    /// `output_names` entries so a downstream block can reference them directly via
+    /// <!-- component -->
+    /// # Coordinate Transform (Clarke/Park)
+    /// **Purpose:** one of the six Clarke/Park three-phase coordinate transforms.
+    /// **Library:** Coordinate Transforms
+    ///
+    /// ## Description
+    /// The standard `abc`/`alpha-beta-0`/`d-q-0` change of basis (see
+    /// `continuous_blocks::CoordinateTransform`) used to regulate a three-phase quantity
+    /// (grid-tied PFC, motor drive) with a `Pid` on a DC-like `d`/`q` value instead of chasing
+    /// a sine wave directly. Stateless and multi-output, following exactly the same
+    /// `output_names` convention [`BlockKind::CScript`] established: `inputs` supplies
+    /// `kind.input_count()` values in the order `CoordinateTransform::call` expects,
+    /// `output_names.len()` must equal 3 (this family's output count — the conventional
+    /// per-transform names, e.g. `["alpha", "beta", "zero"]` for `Clarke`), the block's own
+    /// `.name` binds to the first (primary) output, and the remaining two are inserted under
+    /// their own `output_names` entries so a downstream block can reference them directly via
     /// `Signal::Block(name)`.
+    ///
+    /// ## Parameters
+    /// - `kind=<clarke|clarkeinv|park|parkinv|clarkepark|clarkeparkinv>` — which transform.
+    /// - `inputs=<sig1,...>` — `3` entries for `clarke`/`clarkeinv`, `4` for the other four
+    ///   (`park`/`parkinv`/`clarkepark`/`clarkeparkinv` also take an angle input).
+    /// - `outputs=<name1,name2,name3>` — optional; defaults to `<name>,<name>_<suffix2>,
+    ///   <name>_<suffix3>` using this transform's own conventional output names.
+    ///
+    /// ## Errors
+    /// - Wrong `inputs=` count for this transform — rejected at parse time: `kind='<kind>'
+    ///   needs <n> inputs (got <m>)`.
+    /// - `outputs=` with a count other than 3 — rejected at parse time: `'outputs' needs
+    ///   exactly 3 entries (got <n>)`.
+    ///
+    /// ## Netlist form
+    /// ```text
+    /// NAME kind=clarke inputs=<a,b,c> [outputs=<name1,name2,name3>]
+    /// NAME kind=park inputs=<a,b,c,theta> [outputs=<name1,name2,name3>]
+    /// ```
+    ///
+    /// ## Example
+    /// A balanced three-phase set through `clarke` — verified end to end: for
+    /// $a=1,b=-0.5,c=-0.5$ (a peak on phase A), $\alpha = 1$, $\beta = 0$ exactly:
+    /// ```text
+    /// A kind=const value=1
+    /// B kind=const value=-0.5
+    /// C kind=const value=-0.5
+    /// CT1 kind=clarke inputs=A,B,C
+    /// ```
     CoordinateTransform {
         /// Which of the six Clarke/Park transforms this is.
         kind: CoordinateTransform,
         /// Output names; length must equal 3 for this family.
         output_names: Vec<String>,
     },
-    /// A permanent-magnet synchronous motor (see [`continuous_blocks::Pmsm`]) — genuinely
-    /// nonlinear (bilinear speed/current coupling), so like [`BlockKind::Vco`] it carries its
-    /// own state and is integrated via its own `step()` (RK4) rather than compiled to a
-    /// [`StateSpace`]. Three inputs, in order: `vd`, `vq` (rotor-frame stator voltage commands,
-    /// V — typically a `ClarkeParkInv`'s output, or a `CoordinateTransform` intermediate wired
-    /// through a `Pid`), and `t_load` (N*m, the mechanical load torque). Four outputs, same
-    /// `output_names` convention as [`BlockKind::CoordinateTransform`]/[`BlockKind::CScript`]
-    /// (`output_names.len()` must be 4, the block's own name aliases the first/primary output):
-    /// `id`, `iq` (A), `omega_m` (mechanical speed, rad/s), and `theta_e` (electrical angle,
-    /// already wrapped to `[0, 2*pi)` via [`continuous_blocks::Pmsm::theta_e_wrapped`] — ready
-    /// to feed a [`BlockKind::CoordinateTransform`] `Park`/`ClarkePark` block directly). Starts
-    /// at rest (`id = iq = omega_m = theta_e = 0`) — no initial-condition override, matching
-    /// every other dynamic block in this graph.
+    /// <!-- component -->
+    /// # PMSM (Permanent-Magnet Synchronous Motor)
+    /// **Purpose:** a nonlinear permanent-magnet synchronous motor model.
+    /// **Library:** Machines
+    ///
+    /// ## Description
+    /// Genuinely nonlinear (bilinear speed/current coupling — see `continuous_blocks::Pmsm`),
+    /// so like [`BlockKind::Vco`] it carries its own state and is integrated via its own
+    /// `step()` (RK4) rather than compiled to a `StateSpace`. Three inputs, in order: `vd`,
+    /// `vq` (rotor-frame stator voltage commands, V — typically a `ClarkeParkInv`'s output, or
+    /// a `CoordinateTransform` intermediate wired through a `Pid`), and `t_load` (N·m, the
+    /// mechanical load torque). Four outputs, same `output_names` convention as
+    /// [`BlockKind::CoordinateTransform`]/[`BlockKind::CScript`]: `id`, `iq` (A), `omega_m`
+    /// (mechanical speed, rad/s), and `theta_e` (electrical angle, already wrapped to
+    /// $[0, 2\pi)$ via `Pmsm::theta_e_wrapped` — ready to feed a `Park`/`ClarkePark` block
+    /// directly). Starts at rest (`id = iq = omega_m = theta_e = 0`) — no initial-condition
+    /// override, matching every other dynamic block in this graph. Surface-mount motors have
+    /// `l_d == l_q` (no reluctance torque term); interior-PM motors have `l_d != l_q`.
+    ///
+    /// ## Parameters
+    /// - `r_s=<f64>` — stator resistance, Ω; must be `>= 0`.
+    /// - `l_d=<f64>`, `l_q=<f64>` — d/q-axis inductance, H; both must be `> 0`.
+    /// - `lambda_pm=<f64>` — permanent-magnet flux linkage, Wb.
+    /// - `pole_pairs=<f64>` — must be `> 0`.
+    /// - `inertia=<f64>` — rotor inertia, kg·m²; must be `> 0`.
+    /// - `friction=<f64>` — viscous friction coefficient; must be `>= 0`.
+    /// - `inputs=<vd,vq,t_load>` — exactly 3, in this order.
+    /// - `outputs=<id,iq,omega_m,theta_e>` — optional; defaults to `<name>,<name>_iq,
+    ///   <name>_omega_m,<name>_theta_e`.
+    ///
+    /// ## Errors
+    /// - `r_s < 0` — `invalid pmsm (NegativeResistance)`.
+    /// - `l_d <= 0` or `l_q <= 0` — `invalid pmsm (NonPositiveInductance)`.
+    /// - `pole_pairs <= 0` — `invalid pmsm (NonPositivePolePairs)`.
+    /// - `inertia <= 0` — `invalid pmsm (NonPositiveInertia)`.
+    /// - `friction < 0` — `invalid pmsm (NegativeFriction)`.
+    ///
+    /// ## Netlist form
+    /// ```text
+    /// NAME kind=pmsm r_s=<f64> l_d=<f64> l_q=<f64> lambda_pm=<f64> pole_pairs=<f64> \
+    ///      inertia=<f64> friction=<f64> inputs=<vd,vq,t_load> [outputs=<id,iq,omega_m,theta_e>]
+    /// ```
+    ///
+    /// ## Example
+    /// A small surface-mount motor at rest with zero applied voltage/load — verified to run
+    /// without error and stay at rest (`id = iq = omega_m = 0`, no torque applied):
+    /// ```text
+    /// VD kind=const value=0
+    /// VQ kind=const value=0
+    /// TLOAD kind=const value=0
+    /// M1 kind=pmsm r_s=0.5 l_d=1e-3 l_q=1e-3 lambda_pm=0.05 pole_pairs=4 inertia=1e-5 \
+    ///      friction=1e-6 inputs=VD,VQ,TLOAD
+    /// ```
     Pmsm {
         /// The motor's own parameters/state.
         pmsm: Pmsm,
         /// Output names; length must equal 4 (`id`, `iq`, `omega_m`, `theta_e`).
         output_names: Vec<String>,
     },
-    /// The **PS-to-Signal** converter: the *only* way a circuit quantity (`V(node)`/
-    /// `I(branch)`) enters the signal domain. Zero block-graph inputs (it reads the circuit's
-    /// own previous-step operating point directly, the same `point_prev` lookup a bare
-    /// `meas:`-style reference used to do before this was enforced) — its value is then an
-    /// ordinary block output, read by any downstream block via `Signal::Block(this_block's_name)`
-    /// exactly like any other source block (`Const`/`Pwl`/`Time`). Modeled directly on the
-    /// physical/signal converter block a real block-diagram tool requires: a physical port and
-    /// a signal port are type-distinct there and cannot be wired together without one of these
-    /// in between: this is the same rule, enforced the same way, at the netlist level instead
-    /// of a GUI's wiring canvas (a future UI enforcing the same rule visually is the intended
-    /// companion, not a replacement for this).
+    /// <!-- component -->
+    /// # Probe (Physical-to-Signal Converter)
+    /// **Purpose:** the only way a circuit quantity enters the signal domain.
+    /// **Library:** Electrical Interface
+    ///
+    /// ## Description
+    /// Zero block-graph inputs (it reads the circuit's own previous-step operating point
+    /// directly). Its value is then an ordinary block output, read by any downstream block via
+    /// `Signal::Block(this_block's_name)` exactly like any other source block
+    /// (`Const`/`Pwl`/`Time`). Modeled directly on the physical/signal converter block a real
+    /// block-diagram simulation tool requires: a physical port and a signal port are
+    /// type-distinct there and cannot be wired together without one of these in between — the
+    /// same rule, enforced the same way, at the netlist level instead of a GUI's wiring canvas.
+    ///
+    /// ## Parameters
+    /// - `node=<name>` — reads `V(node)`. Mutually exclusive with `branch=`.
+    /// - `branch=<name>` — reads `I(branch)`. Mutually exclusive with `node=`.
+    ///
+    /// ## Errors
+    /// - Both `node=` and `branch=` given — rejected at parse time: `'node' and 'branch' are
+    ///   mutually exclusive (a probe reads either a node voltage or a branch current, never
+    ///   both)`.
+    /// - Neither given — rejected at parse time: `kind='probe' needs 'node=<name>' (reads
+    ///   V(node)) or 'branch=<name>' (reads I(branch))`.
+    ///
+    /// ## Netlist form
+    /// ```text
+    /// NAME kind=probe node=<node_name>
+    /// NAME kind=probe branch=<branch_name>
+    /// ```
+    ///
+    /// ## Example
+    /// Probing a resistor-divider node's own voltage — verified end to end, `PROBE1` tracking
+    /// `V(out)` exactly:
+    /// ```text
+    /// V1 in 0 5
+    /// R1 in out 1k
+    /// R2 out 0 1k
+    /// PROBE1 kind=probe node=out
+    /// ```
     Probe(ProbeTarget),
-    /// The **Signal-to-PS** converter for a continuous quantity, closing the write-direction
-    /// gap [`BlockKind::Probe`] doesn't (a probe only ever reads): the *only* legal way a
-    /// signal-domain block's output drives an independent voltage source's own magnitude *or*
-    /// a MOSFET's gate. A `V` element's own literal value field in the netlist names this block
-    /// directly (e.g. `V1 a 0 VDRV`, where `VDRV` is a declared `Sig2Voltage` block) —
-    /// `general-mna`'s own `Expression::parse_scalar` already accepts a bare symbol there with
-    /// no change needed on that side; `dae-runtime` requires, at validation time, that any such
-    /// symbol naming a declared block resolve to exactly this kind (see
-    /// `DaeError::SourceNotSig2PhysicalConverter`), and every step, substitutes this block's own
-    /// just-computed output value into the circuit solve in that symbol's place — a real,
-    /// bidirectional physical/control coupling `Signal::Measure`'s read-only predecessor could
-    /// never express (see `elspice-pwl-buck-dc-motor-cascade`'s own README for the concrete gap
-    /// this closes: a block could observe a circuit's voltage but never load it).
+    /// <!-- component -->
+    /// # Sig2Voltage (Signal-to-Physical Converter)
+    /// **Purpose:** the only legal way a signal-domain block's output drives a voltage source's
+    /// magnitude or a MOSFET's gate.
+    /// **Library:** Electrical Interface
+    ///
+    /// ## Description
+    /// Closes the write-direction gap [`BlockKind::Probe`] doesn't (a probe only ever reads). A
+    /// `V` element's own literal value field in the netlist names this block directly (e.g.
+    /// `V1 a 0 VDRV`, where `VDRV` is a declared `Sig2Voltage` block) — `general-mna`'s own
+    /// `Expression::parse_scalar` already accepts a bare symbol there with no change needed on
+    /// that side; `dae-runtime` requires, at validation time, that any such symbol naming a
+    /// declared block resolve to exactly this kind (`DaeError::SourceNotSig2PhysicalConverter`
+    /// otherwise), and every step, substitutes this block's own just-computed output value into
+    /// the circuit solve in that symbol's place.
     ///
     /// Also the *only* legal target for a [`GateBinding::Block`]'s own named block —
     /// `dae-runtime` rejects a `GateBinding` naming anything else with
     /// `DaeError::GateTargetNotSig2Voltage`. A MOSFET's gate is itself a voltage (`V_GS`
     /// against `v_th`), not a distinct discrete-actuation signal domain, so there is no
-    /// separate gate-only converter here — one type, `Sig2Voltage`, is the whole Signal-to-PS
+    /// separate gate-only converter — one type, `Sig2Voltage`, is the whole Signal-to-PS
     /// boundary for "a signal-domain block's output drives a physical voltage," whether that
-    /// voltage happens to source a node or gate a switch. (An earlier design had a separate
-    /// `Sig2Gate` converter purely for marking discrete actuation; removed once the "gate is
-    /// just a voltage, no dedicated controller needed" framing made that distinction
-    /// unnecessary weight for every netlist author to carry.)
+    /// voltage happens to source a node or gate a switch. Purely an identity pass-through
+    /// numerically (`value = input`) in both roles; the type-distinct name is what the
+    /// enforcement keys on. One input.
     ///
-    /// Purely an identity pass-through numerically (`value = input`) in both roles; the
-    /// type-distinct name is what the enforcement (and, later, a UI) keys on. One input.
+    /// ## Parameters
+    /// - `in=<signal>` — the value to drive onto the physical side (one input).
+    ///
+    /// ## Errors
+    /// None specific to this `kind=` beyond the generic missing-field error — every real
+    /// enforcement (a `V`/gate target actually naming a `Sig2Voltage`) happens at
+    /// `dae-runtime`'s validation stage, not netlist parse time.
+    ///
+    /// ## Netlist form
+    /// ```text
+    /// NAME kind=sig2voltage in=<signal>
+    /// ```
+    ///
+    /// ## Example
+    /// A block-driven voltage source — verified end to end, `V1`'s magnitude tracking a
+    /// `Const` through the converter exactly:
+    /// ```text
+    /// CMD kind=const value=5
+    /// VDRV kind=sig2voltage in=CMD
+    /// V1 a 0 VDRV
+    /// R1 a 0 1k
+    /// ```
     Sig2Voltage,
-    /// The [`BlockKind::Sig2Voltage`] counterpart for an `I` (independent current source)
-    /// element's own literal value field. One input.
+    /// <!-- component -->
+    /// # Sig2Current (Signal-to-Physical Converter)
+    /// **Purpose:** the [`BlockKind::Sig2Voltage`] counterpart for an `I` (independent current
+    /// source) element's own literal value field.
+    /// **Library:** Electrical Interface
+    ///
+    /// ## Description
+    /// Identical role and enforcement to [`BlockKind::Sig2Voltage`], for an `I` source's
+    /// magnitude instead of a `V` source's. One input.
+    ///
+    /// ## Parameters
+    /// - `in=<signal>` — the value to drive onto the physical side (one input).
+    ///
+    /// ## Errors
+    /// None specific to this `kind=` beyond the generic missing-field error (see
+    /// [`BlockKind::Sig2Voltage`]'s own Errors).
+    ///
+    /// ## Netlist form
+    /// ```text
+    /// NAME kind=sig2current in=<signal>
+    /// ```
+    ///
+    /// ## Example
+    /// A block-driven current source — verified end to end, `I1`'s magnitude tracking a
+    /// `Const` through the converter exactly:
+    /// ```text
+    /// CMD kind=const value=0.1
+    /// IDRV kind=sig2current in=CMD
+    /// I1 a 0 IDRV
+    /// R1 a 0 1k
+    /// ```
     Sig2Current,
 }
 
@@ -1448,6 +2033,56 @@ pub struct BlockInstance {
 /// carrier at all, event-driven bang-bang switching), or any other block a caller composes.
 #[derive(Debug, Clone, PartialEq)]
 pub enum GateBinding {
+    /// <!-- component -->
+    /// # Gate Binding
+    /// **Purpose:** how a MOSFET's gate state is resolved from a named block, every step.
+    /// **Library:** Electrical Interface
+    ///
+    /// ## Description
+    /// This is not a `kind=` block itself — it's the `gate=`/`ctrl=` field pair on a
+    /// `kind=mosfet` device line. `GateBinding` has exactly one variant and exactly one job:
+    /// reading a named block's current output and thresholding it at `>= 0.5`. No non-block-
+    /// driven variant exists — even a permanently-off gate is an explicit `Const(0.0)` wired
+    /// through a [`BlockKind::Sig2Voltage`], the same as every other gate. The named block
+    /// (`ctrl=`) must itself be a [`BlockKind::Sig2Voltage`] — a MOSFET's gate is itself a
+    /// voltage ($V_{GS}$ against $v_{th}$), not a distinct discrete-actuation signal domain.
+    ///
+    /// ## Parameters
+    /// - `gate=block` — the only accepted value; every gate is block-driven.
+    /// - `ctrl=<name>` — the name of a declared [`BlockKind::Sig2Voltage`] block.
+    ///
+    /// ## Errors
+    /// - `gate=` missing entirely on a `kind=mosfet` line — rejected at parse time: `missing
+    ///   field 'gate' (gate=block ctrl=<name> -- every gate is block-driven, see this file's
+    ///   own module doc comment)`.
+    /// - `gate=` present but not `block` — rejected at parse time: `unknown gate spec '<value>'
+    ///   (only gate=block ctrl=<name> exists -- every gate is block-driven)`.
+    /// - `ctrl=` naming a block that isn't a [`BlockKind::Sig2Voltage`] — rejected at
+    ///   `dae-runtime`'s validation stage (not netlist parse time):
+    ///   `DaeError::GateTargetNotSig2Voltage`.
+    ///
+    /// ## Netlist form
+    /// ```text
+    /// NAME kind=mosfet r_on=<f64> g_breakdown=<f64> v_breakdown=<f64> g_off=<f64> \
+    ///      v_th=<f64> g_on=<f64> gate=block ctrl=<sig2voltage_block_name>
+    /// ```
+    ///
+    /// ## Example
+    /// A MOSFET permanently held on via a `Const(1)` wired through `Sig2Voltage` — the plain
+    /// `D1 in out mosfetmodel` line gives the electrical connectivity (drain, source; the
+    /// model name is unused for a `kind=mosfet`-overridden device), the same-named `kind=mosfet`
+    /// line supplies the physics and gate. Verified end to end: `V(out)` settles to
+    /// `5 * 1000 / (1000 + 0.1) ≈ 4.9995` (a fully-on 0.1 Ω MOSFET in series with a 1 kΩ load):
+    /// ```text
+    /// ONVAL kind=const value=1
+    /// ONGATE kind=sig2voltage in=ONVAL
+    /// V1 in 0 5
+    /// D1 in out mosfetmodel
+    /// D1 kind=mosfet r_on=0.1 g_breakdown=0 v_breakdown=-100 g_off=0 v_th=0.5 g_on=5 \
+    ///      gate=block ctrl=ONGATE
+    /// R1 out 0 1k
+    /// ```
+    ///
     /// On while the named block's current output is `>= 0.5`.
     Block(String),
 }
