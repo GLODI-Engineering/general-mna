@@ -4,7 +4,9 @@
 //! Phase 2 of the format-unification plan: `general-simulator` no longer parses the block DSL
 //! itself, it only evaluates what this builder hands it.
 
-use general_mna::block_graph::{BlockKind, ConstValue, GateBinding, Signal};
+use general_mna::block_graph::{
+    BlockKind, ConstValue, GateBinding, PidClamp, SampleTimeSpec, Signal,
+};
 use general_mna::{build_system, System};
 use general_spice_core::dialect::Dialect;
 
@@ -215,4 +217,122 @@ fn counter_with_modulus_and_reset_declares_both_extra_inputs() {
         }
     );
     assert_eq!(cnt.inputs.len(), 2); // clk, reset (no up_down)
+}
+
+#[test]
+fn discretestatespace_parses_matrices_and_a_mandatory_periodic_sample_time() {
+    let source = "FILTER kind=discretestatespace a=[[0.5]] b=[2] c=[1] d=0 in=DUTY ts=0.1\n\
+         DUTY kind=const value=1\n";
+    let System { blocks, .. } = build_system(source, Dialect::Ngspice).unwrap();
+    let filter = blocks.iter().find(|b| b.name == "FILTER").unwrap();
+    match &filter.kind {
+        BlockKind::DiscreteStateSpace { ss, sample_time } => {
+            assert_eq!(ss.a, vec![vec![0.5]]);
+            assert_eq!(ss.b, vec![vec![2.0]]);
+            assert_eq!(
+                *sample_time,
+                SampleTimeSpec::Periodic {
+                    period: 0.1,
+                    offset: 0.0
+                }
+            );
+        }
+        other => panic!("expected DiscreteStateSpace, got {other:?}"),
+    }
+}
+
+#[test]
+fn discretestatespace_without_ts_or_freq_is_a_clear_error_not_silently_continuous() {
+    let source = "FILTER kind=discretestatespace a=[[0.5]] b=[2] c=[1] d=0 in=DUTY\n\
+                  DUTY kind=const value=1\n";
+    let err = build_system(source, Dialect::Ngspice).unwrap_err();
+    assert!(err.contains("missing 'ts=' or 'freq='"), "got: {err}");
+}
+
+#[test]
+fn discretestatespace_rejects_ts_variable() {
+    let source = "FILTER kind=discretestatespace a=[[0.5]] b=[2] c=[1] d=0 in=DUTY ts=variable\n\
+                  DUTY kind=const value=1\n";
+    let err = build_system(source, Dialect::Ngspice).unwrap_err();
+    assert!(err.contains("ts=variable is not available"), "got: {err}");
+}
+
+#[test]
+fn discretetf_parses_num_den_and_sample_time() {
+    let source = "FILTER kind=discretetf num=[1] den=[1,-0.5] in=DUTY freq=10\n\
+                  DUTY kind=const value=1\n";
+    let System { blocks, .. } = build_system(source, Dialect::Ngspice).unwrap();
+    let filter = blocks.iter().find(|b| b.name == "FILTER").unwrap();
+    match &filter.kind {
+        BlockKind::DiscreteTransferFunction { tf, sample_time } => {
+            assert_eq!(tf.num, vec![1.0]);
+            assert_eq!(tf.den, vec![1.0, -0.5]);
+            assert_eq!(
+                *sample_time,
+                SampleTimeSpec::Periodic {
+                    period: 0.1,
+                    offset: 0.0
+                }
+            );
+        }
+        other => panic!("expected DiscreteTransferFunction, got {other:?}"),
+    }
+}
+
+#[test]
+fn discretepid_defaults_to_forward_euler_and_parses_fixed_clamp() {
+    let source = "CTRL kind=discretepid kp=1 ki=2 kd=0 n=1 in=ERR ts=0.01 clamp_lo=-1 clamp_hi=1\n\
+         ERR kind=const value=0\n";
+    let System { blocks, .. } = build_system(source, Dialect::Ngspice).unwrap();
+    let ctrl = blocks.iter().find(|b| b.name == "CTRL").unwrap();
+    match &ctrl.kind {
+        BlockKind::DiscretePid {
+            pid,
+            clamp,
+            sample_time,
+        } => {
+            assert_eq!(pid.kp, 1.0);
+            assert_eq!(pid.period, 0.01);
+            assert_eq!(
+                pid.method,
+                continuous_blocks::DiscreteIntegrationMethod::ForwardEuler
+            );
+            assert_eq!(*clamp, PidClamp::Fixed(-1.0, 1.0));
+            assert_eq!(
+                *sample_time,
+                SampleTimeSpec::Periodic {
+                    period: 0.01,
+                    offset: 0.0
+                }
+            );
+        }
+        other => panic!("expected DiscretePid, got {other:?}"),
+    }
+}
+
+#[test]
+fn discretepid_honors_an_explicit_integration_method() {
+    let source = "CTRL kind=discretepid kp=0 ki=1 kd=0 n=1 in=ERR ts=0.01 clamp_lo=-1 clamp_hi=1 \
+         integration_method=trapezoidal\n\
+         ERR kind=const value=0\n";
+    let System { blocks, .. } = build_system(source, Dialect::Ngspice).unwrap();
+    let ctrl = blocks.iter().find(|b| b.name == "CTRL").unwrap();
+    match &ctrl.kind {
+        BlockKind::DiscretePid { pid, .. } => {
+            assert_eq!(
+                pid.method,
+                continuous_blocks::DiscreteIntegrationMethod::Trapezoidal
+            );
+        }
+        other => panic!("expected DiscretePid, got {other:?}"),
+    }
+}
+
+#[test]
+fn discretepid_unknown_integration_method_is_a_clear_error() {
+    let source = "CTRL kind=discretepid kp=0 ki=1 kd=0 n=1 in=ERR ts=0.01 clamp_lo=-1 clamp_hi=1 \
+         integration_method=nonsense\n\
+         ERR kind=const value=0\n";
+    let err = build_system(source, Dialect::Ngspice).unwrap_err();
+    assert!(err.contains("unknown integration_method"), "got: {err}");
 }

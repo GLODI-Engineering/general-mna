@@ -28,8 +28,8 @@
 use std::collections::BTreeMap;
 
 use continuous_blocks::{
-    CoordinateTransform, FlipFlopKind, Hysteresis, LatchPriority, LogicOp, MathFn1, MathFn2,
-    MathFn3, Pid, Pmsm, StateSpace, TransferFunction, Vco,
+    CoordinateTransform, DiscretePid, FlipFlopKind, Hysteresis, LatchPriority, LogicOp, MathFn1,
+    MathFn2, MathFn3, Pid, Pmsm, StateSpace, TransferFunction, Vco,
 };
 
 use crate::{SwitchState, TransientFunction};
@@ -279,6 +279,43 @@ pub enum BlockKind {
     /// derivation). Compiled once via [`TransferFunction::to_state_space`]; no anti-windup, for
     /// the same reason `StateSpace` above has none.
     TransferFunction(TransferFunction),
+    /// The discrete-domain counterpart to [`BlockKind::StateSpace`] above — `x[i+1] = A*x[i] +
+    /// B*u[i]`, `y[i] = C*x[i] + D*u[i]`, a plain linear recursion (no RK4, no `dt` at all): `A`/
+    /// `B`/`C`/`D` are already discrete-domain matrices, given directly by the netlist author,
+    /// not derived from continuous ones. `sample_time` is **required** here (unlike `cscript`'s
+    /// own optional field) and must be [`SampleTimeSpec::Periodic`] — a discrete system's own
+    /// dynamics *are* its sample period, there is no "continuous" fallback the way `None` means
+    /// for `cscript`, and `Variable` doesn't compose with a fixed-period recursion at all. See
+    /// `general-simulator`'s own `book/dev-guide/src/discrete-time-blocks.md`.
+    DiscreteStateSpace {
+        ss: StateSpace,
+        sample_time: SampleTimeSpec,
+    },
+    /// The discrete-domain counterpart to [`BlockKind::TransferFunction`] above — `Y(z)/U(z) =
+    /// N(z)/D(z)`, coefficients already in the `z`-domain. Realized via the exact same
+    /// [`TransferFunction::to_state_space`] the continuous version uses (coefficient-to-
+    /// companion-form conversion is domain-agnostic algebra — it doesn't know or care whether
+    /// the variable is called `s` or `z`), evaluated via [`StateSpace::discrete_step`] instead
+    /// of `rk4_step`. Same mandatory-`Periodic`-`sample_time` rule as `DiscreteStateSpace`.
+    DiscreteTransferFunction {
+        tf: TransferFunction,
+        sample_time: SampleTimeSpec,
+    },
+    /// The discrete-domain counterpart to [`BlockKind::Pid`] above — reuses the exact same
+    /// [`PidClamp`] anti-windup mechanism, but the integral/derivative actions advance once per
+    /// declared sample period via [`continuous_blocks::DiscretePid::step`] instead of RK4-
+    /// integrating continuously. Not built by converting to one combined `z`-domain transfer
+    /// function and back — realized directly from the block's own diagram (three parallel
+    /// branches, summed); see `discrete-time-blocks.md`'s own Category 3 for the full
+    /// derivation, including the docling-reading-order correction it depended on. Same
+    /// mandatory-`Periodic`-`sample_time` rule as `DiscreteStateSpace`/`DiscreteTransferFunction`
+    /// above — `DiscretePid`'s own `period` field is set *from* this same `sample_time`, not a
+    /// separately-entered value.
+    DiscretePid {
+        pid: DiscretePid,
+        clamp: PidClamp,
+        sample_time: SampleTimeSpec,
+    },
     /// A voltage-controlled oscillator (see [`Vco`]) — a bare, standalone oscillator producing
     /// a `[0, 1)` ramp, still useful on its own (a raw frequency-to-ramp conversion for
     /// something other than gate control). Not how a gate-driving PWM modulator gets its own
@@ -615,6 +652,9 @@ pub fn block_kind_name(kind: &BlockKind) -> &'static str {
         BlockKind::Pid { .. } => "pid",
         BlockKind::StateSpace(_) => "statespace",
         BlockKind::TransferFunction(_) => "tf",
+        BlockKind::DiscreteStateSpace { .. } => "discretestatespace",
+        BlockKind::DiscreteTransferFunction { .. } => "discretetf",
+        BlockKind::DiscretePid { .. } => "discretepid",
         BlockKind::Vco(_) => "vco",
         BlockKind::Pwm { .. } => "pwm",
         BlockKind::PhaseShiftPwm { .. } => "pspwm",

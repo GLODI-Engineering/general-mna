@@ -8,8 +8,8 @@
 use std::collections::BTreeMap;
 
 use continuous_blocks::{
-    CoordinateTransform, FlipFlopKind, Hysteresis, LatchPriority, LogicOp, Pid, StateSpace,
-    TransferFunction, Vco,
+    CoordinateTransform, DiscreteIntegrationMethod, DiscretePid, FlipFlopKind, Hysteresis,
+    LatchPriority, LogicOp, Pid, StateSpace, TransferFunction, Vco,
 };
 use general_spice_core::ast::Statement;
 use general_spice_core::dialect::Dialect;
@@ -283,6 +283,36 @@ fn parse_sample_time(
             }
             Ok(Some(SampleTimeSpec::Periodic { period, offset }))
         }
+    }
+}
+
+/// Parses the same `ts=`/`freq=`/`to=` fields as [`parse_sample_time`], but for the three
+/// discrete-time blocks (`kind=discretestatespace`/`discretetf`/`discretepid`) where a sample
+/// time isn't optional the way it is for `cscript`/`pyblock`/`pyfunc` -- a discrete system's own
+/// dynamics *are* its sample period, so there's no "continuous" fallback for an omitted `ts=`/
+/// `freq=` to mean, and `ts=variable` doesn't compose with a fixed-period recursion at all (its
+/// own coefficients are baked in at that one period). See `discrete-time-blocks.md`.
+fn parse_required_periodic_sample_time(
+    fields: &BTreeMap<String, String>,
+    name: &str,
+    line_number: usize,
+) -> Result<SampleTimeSpec, String> {
+    match parse_sample_time(fields, name, line_number, true)? {
+        Some(SampleTimeSpec::Periodic { period, offset }) => {
+            Ok(SampleTimeSpec::Periodic { period, offset })
+        }
+        Some(SampleTimeSpec::Variable) => Err(format!(
+            "line {}: device '{name}': ts=variable is not available here -- a discrete block's \
+             own recursion has its coefficients baked in at one fixed sample period, which \
+             'the block decides its own next execution time' doesn't compose with",
+            line_number + 1
+        )),
+        None => Err(format!(
+            "line {}: device '{name}': missing 'ts=' or 'freq=' -- a discrete-time block's own \
+             sample period is not optional (its dynamics *are* that period), unlike the \
+             optional 'ts='/'freq=' on kind=cscript/pyblock/pyfunc",
+            line_number + 1
+        )),
     }
 }
 
@@ -1070,6 +1100,126 @@ fn build_kind(stmt: &general_spice_core::ast::BlockInstance) -> Result<Kind, Str
                 name: name.to_string(),
                 kind: BlockKind::TransferFunction(tf),
                 inputs: vec![parse_signal(&get_str("in")?)],
+            })
+        }
+        "discretestatespace" => {
+            let a = parse_matrix_rows(&get_str("a")?, name, "a", line_number)?;
+            let b = parse_matrix_or_vector_shorthand(&get_str("b")?, name, "b", line_number, true)?;
+            let c =
+                parse_matrix_or_vector_shorthand(&get_str("c")?, name, "c", line_number, false)?;
+            let p = b.first().map_or(0, |row| row.len());
+            let q = c.len();
+            let d = match fields.get("d") {
+                None => vec![vec![0.0; p]; q],
+                Some(text) if text.trim().starts_with('[') => {
+                    parse_matrix_rows(text, name, "d", line_number)?
+                }
+                Some(text) => {
+                    if q != 1 || p != 1 {
+                        return Err(format!(
+                            "line {}: device '{name}' field 'd' is a bare scalar, but this \
+                             system has {q} output(s) and {p} input(s) -- declare \
+                             'd=[[...],...]' ({q}x{p}) for a MIMO system, a bare scalar is only \
+                             valid for a 1x1 (SISO) one",
+                            line_number + 1
+                        ));
+                    }
+                    let v: f64 = text.trim().parse().map_err(|_| {
+                        format!(
+                            "line {}: device '{name}' field 'd' is not a number",
+                            line_number + 1
+                        )
+                    })?;
+                    vec![vec![v]]
+                }
+            };
+            let ss = StateSpace::new(a, b, c, d, None).map_err(|e| {
+                format!(
+                    "line {}: device '{name}': invalid discrete statespace ({e:?})",
+                    line_number + 1
+                )
+            })?;
+            let sample_time = parse_required_periodic_sample_time(&fields, name, line_number)?;
+            let inputs = match fields.get("inputs") {
+                Some(list) => list.split(',').map(parse_signal).collect(),
+                None => vec![parse_signal(&get_str("in")?)],
+            };
+            Kind::Block(BlockInstance {
+                name: name.to_string(),
+                kind: BlockKind::DiscreteStateSpace { ss, sample_time },
+                inputs,
+            })
+        }
+        "discretetf" => {
+            let num = parse_vector(&get_str("num")?, name, "num", line_number)?;
+            let den = parse_vector(&get_str("den")?, name, "den", line_number)?;
+            let tf = TransferFunction::new(num, den).map_err(|e| {
+                format!(
+                    "line {}: device '{name}': invalid discrete transfer function ({e:?})",
+                    line_number + 1
+                )
+            })?;
+            let sample_time = parse_required_periodic_sample_time(&fields, name, line_number)?;
+            Kind::Block(BlockInstance {
+                name: name.to_string(),
+                kind: BlockKind::DiscreteTransferFunction { tf, sample_time },
+                inputs: vec![parse_signal(&get_str("in")?)],
+            })
+        }
+        "discretepid" => {
+            let sample_time = parse_required_periodic_sample_time(&fields, name, line_number)?;
+            let period = match sample_time {
+                SampleTimeSpec::Periodic { period, .. } => period,
+                SampleTimeSpec::Variable => {
+                    unreachable!("parse_required_periodic_sample_time already rejected ts=variable")
+                }
+            };
+            let method_name = fields
+                .get("integration_method")
+                .map(String::as_str)
+                .unwrap_or("forward");
+            let method = DiscreteIntegrationMethod::from_name(method_name).ok_or_else(|| {
+                format!(
+                    "line {}: device '{name}': unknown integration_method '{method_name}' \
+                     (expected 'forward', 'backward', or 'trapezoidal')",
+                    line_number + 1
+                )
+            })?;
+            let pid = DiscretePid {
+                kp: get("kp")?,
+                ki: get("ki")?,
+                kd: get("kd")?,
+                n: get("n")?,
+                period,
+                method,
+            };
+            let error_input = parse_signal(&get_str("in")?);
+            let (clamp, inputs) = match (fields.get("clamp_lo_in"), fields.get("clamp_hi_in")) {
+                (Some(lo), Some(hi)) => (
+                    PidClamp::Dynamic,
+                    vec![error_input, parse_signal(lo), parse_signal(hi)],
+                ),
+                (None, None) => (
+                    PidClamp::Fixed(get("clamp_lo")?, get("clamp_hi")?),
+                    vec![error_input],
+                ),
+                _ => {
+                    return Err(format!(
+                        "line {}: device '{name}': 'clamp_lo_in'/'clamp_hi_in' must both be \
+                             given together (dynamic clamp) or both omitted (fixed clamp= \
+                             clamp_lo/clamp_hi)",
+                        line_number + 1
+                    ))
+                }
+            };
+            Kind::Block(BlockInstance {
+                name: name.to_string(),
+                kind: BlockKind::DiscretePid {
+                    pid,
+                    clamp,
+                    sample_time,
+                },
+                inputs,
             })
         }
         "product" => Kind::Block(BlockInstance {
