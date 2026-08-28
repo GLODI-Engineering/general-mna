@@ -1,0 +1,66 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust:
+    name: Rust (fmt, clippy, test -- default features)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+
+      - name: cargo clippy (default features -- no Python build dependency)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: cargo test (default features)
+        run: cargo test --workspace --release
+
+      # Not -D warnings: this crate currently has ~13 broken rustdoc intra-doc links (mostly
+      # doc-comment references to symbols that actually live in the general-simulator/spice-lsp
+      # repos, or to private items) -- a real cleanup, but out of scope for wiring up CI itself.
+      # cargo doc still fails this step outright on a genuine doc-build error, just not on warnings.
+      - name: cargo doc
+        run: cargo doc --workspace --no-deps
+
+  rust-python:
+    name: Rust (build, clippy -- optional python feature)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: cargo clippy (python feature)
+        run: cargo clippy --workspace --all-targets --features python -- -D warnings
+
+      - name: cargo test (python feature)
+        run: cargo test --workspace --release --features python

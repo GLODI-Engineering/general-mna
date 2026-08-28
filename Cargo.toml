@@ -10,7 +10,7 @@ documentation = "https://docs.rs/general-mna"
 readme = "README.md"
 keywords = ["spice", "circuit-simulation", "mna", "electronics"]
 categories = ["science", "simulation"]
-publish = false
+publish = true
 
 [lib]
 name = "general_mna"
@@ -22,6 +22,11 @@ python = ["dep:pyo3"]
 
 [dependencies]
 pyo3 = { version = "0.27", features = ["extension-module"], optional = true }
-general-spice-core = { path = "../spice-lsp/servers/core" }
-continuous-blocks = { path = "../general-simulator/crates/continuous-blocks" }
-pwl-devices = { path = "../general-simulator/crates/pwl-devices" }
+# Cross-repo: general-spice-core/continuous-blocks/pwl-devices each live in a separate git
+# repo (spice-lsp, general-simulator). `path` keeps local builds working against the sibling
+# checkouts already required today; `version` is what actually resolves once those crates are
+# published, and is required for `cargo publish` of general-mna itself to succeed at all
+# (crates.io ignores `path`, needs `version`).
+general-spice-core = { path = "../spice-lsp/servers/core", version = "0.1.0" }
+continuous-blocks = { path = "../general-simulator/crates/continuous-blocks", version = "0.1.0" }
+pwl-devices = { path = "../general-simulator/crates/pwl-devices", version = "0.1.0" }
