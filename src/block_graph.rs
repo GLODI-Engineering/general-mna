@@ -166,6 +166,33 @@ pub enum GainValue {
     Matrix(Vec<Vec<f64>>),
 }
 
+/// How a `CScript`/`PyBlock`/`PyFunction` block's own execution is scheduled, independent of
+/// the circuit's own resolved step (see each `BlockKind` variant's own `sample_time` field).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum SampleTimeSpec {
+    /// A fixed sample period `period` (from `ts=`/`freq=`), with an optional phase `offset`
+    /// (from `to=`, required to satisfy `0.0 <= offset < period`) delaying when the *first* hit
+    /// lands. Every hit after the first is spaced by exactly `period`.
+    ///
+    /// **Default, when `to=` is omitted: `offset == 0.0`** — this preserves the exact
+    /// pre-existing behavior every `ts=`/`freq=`-using netlist already had before this field
+    /// could carry an offset at all: `dae-runtime` seeds its own per-instance accumulator so the
+    /// *first* `evaluate_blocks` call a block participates in is always due, unconditionally,
+    /// regardless of `period`'s own value (verified directly against `dae-runtime`'s own
+    /// construction code, not assumed) — i.e. the pre-existing behavior already *was* "no
+    /// offset," not "one period's delay" as it might look at first glance. An explicit `to=X`
+    /// (`0 < X < period`) genuinely delays the first hit to `t=X` instead.
+    Periodic { period: f64, offset: f64 },
+    /// The block computes its own next execution time itself, every time it runs (`ts=variable`
+    /// in the netlist) — for a block whose own next event is known analytically at runtime (a
+    /// modulator's own scheduled switching instant) rather than fixed at parse time. Requires
+    /// the backing `.so`/`.py` to export the corresponding optional next-sample-hit
+    /// function/symbol; see `cscript_ffi`'s/`pyblock_ffi`'s own module doc comments. Not
+    /// available for [`BlockKind::PyFunction`] (rejected at parse time) — a stateless function
+    /// call has no instance to remember a requested next-hit time against.
+    Variable,
+}
+
 /// One block's behavior. `Const`/`Pwc`/`Pwl`/`Sin`/`Pulse`/`Exp`/`Sffm` are sources (zero
 /// inputs); `Sum`/`Gain` are stateless (recomputed fresh from their inputs every step);
 /// `Pid`/`StateSpace`/`TransferFunction`/`Vco` carry their own state forward across steps.
@@ -328,15 +355,12 @@ pub enum BlockKind {
     /// own module doc comment for the full C-side contract and why [`TimeStep::Adaptive`]
     /// requires `cscript_clone` to be exported.
     ///
-    /// `sample_time`, if given, makes this block run on its *own* fixed-period sample grid
-    /// (like a discrete controller block with a configured `Ts` in any block-diagram tool),
-    /// independent of the circuit's own resolved step size: `cscript_output` is only actually
-    /// called once accumulated time since the last call reaches `sample_time`, and this block's
-    /// output holds its last value (zero-order hold) on every step in between — the right model
-    /// for something like a fixed-frequency digital controller, which genuinely does not run at
-    /// the power stage's own (much finer, and possibly adaptive/irregular) step rate. `None`
-    /// (the default) calls `cscript_output` every resolved circuit step instead, passing that
-    /// step's own `dt` — the right choice for a block meant to behave continuously.
+    /// `sample_time`, if given, makes this block run on its *own* schedule, independent of the
+    /// circuit's own resolved step size — either a fixed period (optionally phase-offset), or a
+    /// schedule the block computes for itself every time it runs. `None` (the default) calls
+    /// `cscript_output` every resolved circuit step instead, passing that step's own `dt` — the
+    /// right choice for a block meant to behave continuously. See [`SampleTimeSpec`]'s own doc
+    /// comment for the two `Some(..)` cases.
     ///
     /// `xc_count`, if nonzero, declares this block as owning that many continuous states the
     /// *solver itself* numerically integrates (one independent RK4 per block, the same
@@ -352,7 +376,7 @@ pub enum BlockKind {
     CScript {
         lib: std::path::PathBuf,
         output_names: Vec<String>,
-        sample_time: Option<f64>,
+        sample_time: Option<SampleTimeSpec>,
         xc_count: usize,
     },
     /// A dynamically-loaded, user-supplied Python block (see `pyblock_ffi`) — the Python-hosted
@@ -369,7 +393,7 @@ pub enum BlockKind {
     PyBlock {
         path: std::path::PathBuf,
         output_names: Vec<String>,
-        sample_time: Option<f64>,
+        sample_time: Option<SampleTimeSpec>,
         xc_count: usize,
     },
     /// A plain, stateless, positionally-called Python function — a genuinely separate contract
@@ -381,12 +405,15 @@ pub enum BlockKind {
     /// block-diagram tools. `output_names`/`sample_time` mean the same as `PyBlock`'s own (still
     /// scalar-only outputs, still the same zero-order-hold convention) — there is no `xc_count`
     /// here at all, since a purely stateless function has nothing for a continuous state to mean.
+    /// `sample_time` here is never [`SampleTimeSpec::Variable`] — rejected at parse time — since
+    /// a stateless function call has no instance to remember "when am I next due" against; only
+    /// [`SampleTimeSpec::Periodic`] applies to `PyFunction`.
     /// See `pyblock_ffi::PyFunctionInstance`'s own module doc comment for the full contract.
     PyFunction {
         path: std::path::PathBuf,
         function: String,
         output_names: Vec<String>,
-        sample_time: Option<f64>,
+        sample_time: Option<SampleTimeSpec>,
     },
     /// One of the six Clarke/Park coordinate transforms (see
     /// [`continuous_blocks::CoordinateTransform`]) — the standard `abc`/`alpha-beta-0`/`d-q-0`

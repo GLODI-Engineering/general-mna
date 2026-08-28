@@ -14,7 +14,8 @@ use general_spice_core::{lexer, parser};
 use pwl_devices::{Diode, Mosfet};
 
 use crate::block_graph::{
-    BlockInstance, BlockKind, ConstValue, GainValue, GateBinding, PidClamp, ProbeTarget, Signal,
+    BlockInstance, BlockKind, ConstValue, GainValue, GateBinding, PidClamp, ProbeTarget,
+    SampleTimeSpec, Signal,
 };
 use crate::hierarchy;
 use crate::{MnaBuilder, MnaSystem, TransientFunction};
@@ -191,6 +192,95 @@ fn parse_xy_points(
     }
     points.sort_by(|a, b| a.0.total_cmp(&b.0));
     Ok(points)
+}
+
+/// Parses the `ts=`/`freq=`/`to=` fields shared by `kind=cscript`/`kind=pyblock`/`kind=pyfunc`
+/// into a [`SampleTimeSpec`] — `ts=variable` (only when `allow_variable`, i.e. never for
+/// `pyfunc`, which is stateless) selects [`SampleTimeSpec::Variable`]; a numeric `ts=`/`freq=`
+/// selects [`SampleTimeSpec::Periodic`], with `to=` giving its own explicit `offset`
+/// (defaulting to `0.0` when omitted — see [`SampleTimeSpec`]'s own doc comment for why `0.0`,
+/// not `period`, is what actually preserves this project's pre-existing behavior for every
+/// netlist that never used `to=` at all). `to=`, when given, must satisfy `0.0 <= to < period`.
+fn parse_sample_time(
+    fields: &BTreeMap<String, String>,
+    name: &str,
+    line_number: usize,
+    allow_variable: bool,
+) -> Result<Option<SampleTimeSpec>, String> {
+    let get = |key: &str| -> Result<f64, String> {
+        fields
+            .get(key)
+            .ok_or_else(|| {
+                format!(
+                    "line {}: device '{name}' missing field '{key}'",
+                    line_number + 1
+                )
+            })?
+            .parse::<f64>()
+            .map_err(|_| {
+                format!(
+                    "line {}: device '{name}' field '{key}' is not a number",
+                    line_number + 1
+                )
+            })
+    };
+
+    if fields.get("ts").map(String::as_str) == Some("variable") {
+        if !allow_variable {
+            return Err(format!(
+                "line {}: device '{name}': ts=variable is not available for kind=pyfunc (a \
+                 stateless function call has no instance to remember a requested next-hit \
+                 time against) -- use kind=pyblock instead",
+                line_number + 1
+            ));
+        }
+        if fields.contains_key("freq") || fields.contains_key("to") {
+            return Err(format!(
+                "line {}: device '{name}': ts=variable is exclusive with 'freq'/'to' (the \
+                 block computes its own schedule; there's no fixed period/offset to combine \
+                 it with)",
+                line_number + 1
+            ));
+        }
+        return Ok(Some(SampleTimeSpec::Variable));
+    }
+
+    let period = match (fields.get("ts"), fields.get("freq")) {
+        (Some(_), Some(_)) => {
+            return Err(format!(
+                "line {}: device '{name}': 'ts' and 'freq' are mutually exclusive (both set \
+                 this block's sample time)",
+                line_number + 1
+            ))
+        }
+        (Some(_), None) => Some(get("ts")?),
+        (None, Some(_)) => Some(1.0 / get("freq")?),
+        (None, None) => None,
+    };
+
+    match (period, fields.get("to")) {
+        (None, Some(_)) => Err(format!(
+            "line {}: device '{name}': 'to' requires 'ts' or 'freq' (a phase offset has \
+             nothing to offset without a period)",
+            line_number + 1
+        )),
+        (None, None) => Ok(None),
+        (Some(period), None) => Ok(Some(SampleTimeSpec::Periodic {
+            period,
+            offset: 0.0,
+        })),
+        (Some(period), Some(_)) => {
+            let offset = get("to")?;
+            if !(0.0..period).contains(&offset) {
+                return Err(format!(
+                    "line {}: device '{name}': 'to' ({offset}) must satisfy 0 <= to < ts \
+                     ({period})",
+                    line_number + 1
+                ));
+            }
+            Ok(Some(SampleTimeSpec::Periodic { period, offset }))
+        }
+    }
 }
 
 /// Parses a `kind=const` block's `value=` field: a bare scalar (`value=5`, unchanged from
@@ -763,18 +853,7 @@ fn build_kind(stmt: &general_spice_core::ast::BlockInstance) -> Result<Kind, Str
                 Some(list) => list.split(',').map(parse_signal).collect(),
                 None => vec![parse_signal(&get_str("in")?)],
             };
-            let sample_time = match (fields.get("ts"), fields.get("freq")) {
-                (Some(_), Some(_)) => {
-                    return Err(format!(
-                        "line {}: device '{name}': 'ts' and 'freq' are mutually exclusive \
-                             (both set this block's sample time)",
-                        line_number + 1
-                    ))
-                }
-                (Some(_), None) => Some(get("ts")?),
-                (None, Some(_)) => Some(1.0 / get("freq")?),
-                (None, None) => None,
-            };
+            let sample_time = parse_sample_time(&fields, name, line_number, true)?;
             let xc_count = match fields.get("xc_count") {
                 Some(s) => s.parse::<usize>().map_err(|_| {
                     format!(
@@ -809,18 +888,7 @@ fn build_kind(stmt: &general_spice_core::ast::BlockInstance) -> Result<Kind, Str
                 Some(list) => list.split(',').map(parse_signal).collect(),
                 None => vec![parse_signal(&get_str("in")?)],
             };
-            let sample_time = match (fields.get("ts"), fields.get("freq")) {
-                (Some(_), Some(_)) => {
-                    return Err(format!(
-                        "line {}: device '{name}': 'ts' and 'freq' are mutually exclusive \
-                             (both set this block's sample time)",
-                        line_number + 1
-                    ))
-                }
-                (Some(_), None) => Some(get("ts")?),
-                (None, Some(_)) => Some(1.0 / get("freq")?),
-                (None, None) => None,
-            };
+            let sample_time = parse_sample_time(&fields, name, line_number, true)?;
             let xc_count = match fields.get("xc_count") {
                 Some(s) => s.parse::<usize>().map_err(|_| {
                     format!(
@@ -857,18 +925,7 @@ fn build_kind(stmt: &general_spice_core::ast::BlockInstance) -> Result<Kind, Str
                 Some(list) => list.split(',').map(parse_signal).collect(),
                 None => vec![parse_signal(&get_str("in")?)],
             };
-            let sample_time = match (fields.get("ts"), fields.get("freq")) {
-                (Some(_), Some(_)) => {
-                    return Err(format!(
-                        "line {}: device '{name}': 'ts' and 'freq' are mutually exclusive \
-                             (both set this block's sample time)",
-                        line_number + 1
-                    ))
-                }
-                (Some(_), None) => Some(get("ts")?),
-                (None, Some(_)) => Some(1.0 / get("freq")?),
-                (None, None) => None,
-            };
+            let sample_time = parse_sample_time(&fields, name, line_number, false)?;
             Kind::Block(BlockInstance {
                 name: name.to_string(),
                 kind: BlockKind::PyFunction {
