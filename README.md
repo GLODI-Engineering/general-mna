@@ -112,11 +112,11 @@ use general_spice_core::Dialect;
 let netlist = "V1 in 0 1\nR1 in out R\nC1 out 0 C\n\
      ERR kind=const value=0\nPID1 kind=pid in=ERR kp=1 ki=0 kd=0 n=1 clamp_lo=-1 clamp_hi=1";
 let system = build_system(netlist, Dialect::Ngspice)?;
-// system.mna       -> the same MnaSystem build_fragment produces
-// system.diodes     -> named `D` instances
-// system.mosfets    -> named MOSFET-like switch instances
-// system.gates      -> each MOSFET's resolved gate-drive signal
-// system.blocks     -> every `kind=...` instance, in declaration order
+// system.mna            -> the same MnaSystem build_fragment produces
+// system.ideal_diodes   -> named `D` instances (kind=ideal_diode, or no kind= at all)
+// system.ideal_switches -> named ideal-switch instances (kind=ideal_switch)
+// system.gates          -> each ideal switch's resolved gate-drive signal
+// system.blocks         -> every `kind=...` instance, in declaration order
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
@@ -159,8 +159,8 @@ let averaged = average(&[
 
 The override applies a resistor between the first two terminals of a named
 device. This preserves one unknown vector across all phases, which is required
-for averaging. It also allows a MOSFET instance to be treated as an idealized
-educational switch without implementing a MOS compact model.
+for averaging. It also allows an ideal-switch instance to be treated as an
+idealized educational switch without implementing a MOS compact model.
 
 ## Python, SymPy, and JavaScript
 

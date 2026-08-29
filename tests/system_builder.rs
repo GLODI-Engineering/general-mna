@@ -15,14 +15,14 @@ fn a_plain_electrical_only_deck_still_builds_an_mna_system() {
     let source = "V1 1 0 5\nR1 1 0 1000\n";
     let System {
         mna,
-        diodes,
-        mosfets,
+        ideal_diodes,
+        ideal_switches,
         gates,
         blocks,
         shared_r_on,
     } = build_system(source, Dialect::Ngspice).unwrap();
-    assert!(diodes.is_empty());
-    assert!(mosfets.is_empty());
+    assert!(ideal_diodes.is_empty());
+    assert!(ideal_switches.is_empty());
     assert!(gates.is_empty());
     assert!(blocks.is_empty());
     assert_eq!(shared_r_on, 0.0);
@@ -59,37 +59,37 @@ fn a_python_list_field_builds_the_real_matrix() {
 }
 
 #[test]
-fn a_mosfet_line_correlates_by_name_with_its_block_gate() {
-    // The kind=mosfet line's own device NAME is what ties it to the real SPICE D-element line
-    // sharing that name -- a real structural correlation-by-name, not a coincidence.
-    let source = "V1 vin 0 400\nD1 vin vx mosfetmodel\nR1 vx 0 1000\n\
+fn an_ideal_switch_line_correlates_by_name_with_its_block_gate() {
+    // The kind=ideal_switch line's own device NAME is what ties it to the real SPICE D-element
+    // line sharing that name -- a real structural correlation-by-name, not a coincidence.
+    let source = "V1 vin 0 400\nD1 vin vx idealswitchmodel\nR1 vx 0 1000\n\
                   OFFVAL kind=const value=0\n\
                   OFFGATE kind=sig2voltage in=OFFVAL\n\
-                  D1 kind=mosfet r_on=0.01 g_breakdown=0 v_breakdown=-1e6 g_off=1e-6 v_th=1e6 \
-                  g_on=0 gate=block ctrl=OFFGATE\n";
+                  D1 kind=ideal_switch r_on=0.01 g_breakdown=0 v_breakdown=-1e6 g_off=1e-6 \
+                  v_th=1e6 g_on=0 gate=block ctrl=OFFGATE\n";
     let System {
-        mosfets,
+        ideal_switches,
         gates,
         shared_r_on,
         blocks,
         ..
     } = build_system(source, Dialect::Ngspice).unwrap();
-    assert!(mosfets.contains_key("D1"));
+    assert!(ideal_switches.contains_key("D1"));
     assert_eq!(shared_r_on, 0.01);
     assert_eq!(
         gates.get("D1"),
         Some(&GateBinding::Block("OFFGATE".to_string()))
     );
-    assert_eq!(blocks.len(), 2); // OFFVAL, OFFGATE (D1 itself became a mosfet+gate, not a block)
+    assert_eq!(blocks.len(), 2); // OFFVAL, OFFGATE (D1 itself became an ideal switch+gate, not a block)
 }
 
 #[test]
-fn mismatched_mosfet_r_on_is_a_clear_error() {
+fn mismatched_ideal_switch_r_on_is_a_clear_error() {
     let source = "D1 a b m1\nD2 c d m2\n\
-                  D1 kind=mosfet r_on=0.01 g_breakdown=0 v_breakdown=-100 g_off=0 v_th=1 g_on=1 \
-                  gate=block ctrl=G\n\
-                  D2 kind=mosfet r_on=0.05 g_breakdown=0 v_breakdown=-100 g_off=0 v_th=1 g_on=1 \
-                  gate=block ctrl=G\n";
+                  D1 kind=ideal_switch r_on=0.01 g_breakdown=0 v_breakdown=-100 g_off=0 v_th=1 \
+                  g_on=1 gate=block ctrl=G\n\
+                  D2 kind=ideal_switch r_on=0.05 g_breakdown=0 v_breakdown=-100 g_off=0 v_th=1 \
+                  g_on=1 gate=block ctrl=G\n";
     let err = build_system(source, Dialect::Ngspice).unwrap_err();
     assert!(err.contains("same r_on"), "unexpected error: {err}");
 }

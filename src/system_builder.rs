@@ -14,7 +14,7 @@ use continuous_blocks::{
 use general_spice_core::ast::Statement;
 use general_spice_core::dialect::Dialect;
 use general_spice_core::{lexer, parser};
-use pwl_devices::{Diode, Mosfet};
+use pwl_devices::{IdealDiode, IdealSwitch};
 
 use crate::block_graph::{
     BlockInstance, BlockKind, ConstValue, GainValue, GateBinding, PidClamp, ProbeTarget,
@@ -24,29 +24,31 @@ use crate::hierarchy;
 use crate::{MnaBuilder, MnaSystem, TransientFunction};
 
 /// The result of [`build_system`]: everything a simulator needs, already split into its own
-/// electrical (`mna`/`diodes`/`mosfets`/`gates`) and signal-domain (`blocks`) halves.
+/// electrical (`mna`/`ideal_diodes`/`ideal_switches`/`gates`) and signal-domain (`blocks`)
+/// halves.
 #[derive(Debug)]
 pub struct System {
     /// The electrical MNA system, built by [`crate::MnaBuilder`] from the netlist's element lines.
     pub mna: MnaSystem,
-    /// Every `D` instance, keyed by name, as a companion diode model.
-    pub diodes: BTreeMap<String, Diode>,
-    /// Every MOSFET-like switch instance, keyed by name.
-    pub mosfets: BTreeMap<String, Mosfet>,
-    /// Each MOSFET's resolved gate-drive signal, keyed by the same name as `mosfets`.
+    /// Every `D` instance, keyed by name, as a companion ideal-diode model.
+    pub ideal_diodes: BTreeMap<String, IdealDiode>,
+    /// Every ideal-switch instance, keyed by name.
+    pub ideal_switches: BTreeMap<String, IdealSwitch>,
+    /// Each ideal switch's resolved gate-drive signal, keyed by the same name as
+    /// `ideal_switches`.
     pub gates: BTreeMap<String, GateBinding>,
     /// Every block/signal-domain (`kind=...`) instance, in source declaration order.
     pub blocks: Vec<BlockInstance>,
-    /// Every MOSFET's shared on-resistance (`dae-runtime`'s switch model uses one shared value
-    /// per call) — `0.0` if there are no MOSFETs at all. `build_system` already enforces every
-    /// declared MOSFET agrees on this value.
+    /// Every ideal switch's shared on-resistance (`dae-runtime`'s switch model uses one shared
+    /// value per call) — `0.0` if there are no ideal switches at all. `build_system` already
+    /// enforces every declared ideal switch agrees on this value.
     pub shared_r_on: f64,
 }
 
 enum Kind {
-    Diode(Diode),
-    Mosfet {
-        mosfet: Mosfet,
+    IdealDiode(IdealDiode),
+    IdealSwitch {
+        ideal_switch: IdealSwitch,
         r_on: f64,
         gate: GateBinding,
     },
@@ -80,8 +82,8 @@ pub fn parse_and_flatten(source: &str, dialect: Dialect) -> Result<Vec<Statement
 /// Parses `source` under `dialect` and builds the complete [`System`] — the one entry point a
 /// simulator needs; no parsing code of its own required downstream. Electrical statements go
 /// through the existing [`MnaBuilder`] machinery unchanged; block/signal-domain statements
-/// (`Statement::BlockInstance`) are dispatched by `build_kind` into a `diode`/`mosfet`/block
-/// entry, keyed by the statement's own name.
+/// (`Statement::BlockInstance`) are dispatched by `build_kind` into an `ideal_diode`/
+/// `ideal_switch`/block entry, keyed by the statement's own name.
 ///
 /// **No mandatory title line** — see [`parse_and_flatten`]'s own doc comment, which this
 /// function calls first.
@@ -92,8 +94,8 @@ pub fn build_system(source: &str, dialect: Dialect) -> Result<System, String> {
         .build_statements(&statements)
         .map_err(|e| format!("{e:?}"))?;
 
-    let mut diodes = BTreeMap::new();
-    let mut mosfets = BTreeMap::new();
+    let mut ideal_diodes = BTreeMap::new();
+    let mut ideal_switches = BTreeMap::new();
     let mut gates = BTreeMap::new();
     let mut blocks = Vec::new();
     let mut shared_r_on: Option<f64> = None;
@@ -103,22 +105,27 @@ pub fn build_system(source: &str, dialect: Dialect) -> Result<System, String> {
             continue;
         };
         match build_kind(bi)? {
-            Kind::Diode(d) => {
-                diodes.insert(bi.name.clone(), d);
+            Kind::IdealDiode(d) => {
+                ideal_diodes.insert(bi.name.clone(), d);
             }
-            Kind::Mosfet { mosfet, r_on, gate } => {
+            Kind::IdealSwitch {
+                ideal_switch,
+                r_on,
+                gate,
+            } => {
                 match shared_r_on {
                     None => shared_r_on = Some(r_on),
                     Some(existing) if (existing - r_on).abs() > 1e-15 => {
                         return Err(format!(
-                            "all MOSFETs must share the same r_on (dae-runtime's switch model \
-                             uses one shared on-resistance per call); got {existing} and {r_on}"
+                            "all ideal switches must share the same r_on (dae-runtime's switch \
+                             model uses one shared on-resistance per call); got {existing} and \
+                             {r_on}"
                         ));
                     }
                     Some(_) => {}
                 }
                 gates.insert(bi.name.clone(), gate);
-                mosfets.insert(bi.name.clone(), mosfet);
+                ideal_switches.insert(bi.name.clone(), ideal_switch);
             }
             Kind::Block(instance) => blocks.push(instance),
         }
@@ -126,8 +133,8 @@ pub fn build_system(source: &str, dialect: Dialect) -> Result<System, String> {
 
     Ok(System {
         mna,
-        diodes,
-        mosfets,
+        ideal_diodes,
+        ideal_switches,
         gates,
         blocks,
         shared_r_on: shared_r_on.unwrap_or(0.0),
@@ -511,17 +518,20 @@ fn build_kind(stmt: &general_spice_core::ast::BlockInstance) -> Result<Kind, Str
         })
     };
 
-    let kind = fields.get("kind").map(String::as_str).unwrap_or("diode");
+    let kind = fields
+        .get("kind")
+        .map(String::as_str)
+        .unwrap_or("ideal_diode");
     let entry = match kind {
-        "diode" => Kind::Diode(Diode::new(
+        "ideal_diode" => Kind::IdealDiode(IdealDiode::new(
             get("g_breakdown")?,
             get("v_breakdown")?,
             get("g_off")?,
             get("v_th")?,
             get("g_on")?,
         )),
-        "mosfet" => {
-            let body_diode = Diode::new(
+        "ideal_switch" => {
+            let body_diode = IdealDiode::new(
                 get("g_breakdown")?,
                 get("v_breakdown")?,
                 get("g_off")?,
@@ -532,8 +542,9 @@ fn build_kind(stmt: &general_spice_core::ast::BlockInstance) -> Result<Kind, Str
             // Every gate is block-driven -- gate=block ctrl=<name>, reading that block's
             // current output (>= 0.5 means on). No other gate= spelling exists: a
             // permanently-off gate is an explicit `Const(0.0)` wired through
-            // `kind=sig2voltage` (a MOSFET's gate is itself a voltage, the same Signal-to-PS
-            // boundary a V-source's own magnitude uses -- no dedicated gate-only converter).
+            // `kind=sig2voltage` (an ideal switch's gate is itself a voltage, the same
+            // Signal-to-PS boundary a V-source's own magnitude uses -- no dedicated gate-only
+            // converter).
             let gate = match fields.get("gate").map(String::as_str) {
                 Some("block") => GateBinding::Block(get_str("ctrl")?),
                 Some(other) => {
@@ -552,8 +563,8 @@ fn build_kind(stmt: &general_spice_core::ast::BlockInstance) -> Result<Kind, Str
                     ))
                 }
             };
-            Kind::Mosfet {
-                mosfet: Mosfet::new(r_on, body_diode),
+            Kind::IdealSwitch {
+                ideal_switch: IdealSwitch::new(r_on, body_diode),
                 r_on,
                 gate,
             }

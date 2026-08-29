@@ -1,6 +1,6 @@
 //! The block/signal-domain type vocabulary: `BlockKind`/`BlockInstance` (one named block and
 //! what it computes), `Signal` (where a block's input comes from), `GateBinding` (how a
-//! MOSFET's gate state resolves from a block's output), `ProbeTarget`/`PidClamp` (the two
+//! an ideal switch's gate state resolves from a block's output), `ProbeTarget`/`PidClamp` (the two
 //! `BlockKind` variants complex enough to need their own payload type). Moved here from
 //! `dae-runtime` (Phase 2 of the format-unification plan — see `general-simulator`'s own
 //! `docs/journal/`): `general-mna` is now the single place a netlist's *meaning* is built, both
@@ -1912,7 +1912,7 @@ pub enum BlockKind {
     /// <!-- component -->
     /// # Sig2Voltage (Signal-to-Physical Converter)
     /// **Purpose:** the only legal way a signal-domain block's output drives a voltage source's
-    /// magnitude or a MOSFET's gate.
+    /// magnitude or an ideal switch's gate.
     /// **Library:** Electrical Interface
     ///
     /// ## Description
@@ -1927,7 +1927,7 @@ pub enum BlockKind {
     ///
     /// Also the *only* legal target for a [`GateBinding::Block`]'s own named block —
     /// `dae-runtime` rejects a `GateBinding` naming anything else with
-    /// `DaeError::GateTargetNotSig2Voltage`. A MOSFET's gate is itself a voltage (`V_GS`
+    /// `DaeError::GateTargetNotSig2Voltage`. An ideal switch's gate is itself a voltage (`V_GS`
     /// against `v_th`), not a distinct discrete-actuation signal domain, so there is no
     /// separate gate-only converter — one type, `Sig2Voltage`, is the whole Signal-to-PS
     /// boundary for "a signal-domain block's output drives a physical voltage," whether that
@@ -2022,39 +2022,40 @@ pub struct BlockInstance {
     pub inputs: Vec<Signal>,
 }
 
-/// How one MOSFET's gate state is resolved, every step: always from a named block's current
-/// output, on while it's `>= 0.5`. No non-block-driven variant exists — even a permanently-off
-/// gate is an explicit `Const(0.0)` wired through a [`BlockKind::Sig2Voltage`], the same as
-/// every other gate — and no bare carrier-comparator variant exists either: that comparison now lives
-/// entirely inside gate-driving `BlockKind`s themselves ([`BlockKind::Pwm`]/
-/// [`BlockKind::PhaseShiftPwm`], or a hand-built chain of ordinary blocks), so `GateBinding` has
-/// exactly one job — reading a number and thresholding it — regardless of what produced that
-/// number: a modulator's own main/complement output, a [`BlockKind::Hysteresis`] block (no
-/// carrier at all, event-driven bang-bang switching), or any other block a caller composes.
+/// How one ideal switch's gate state is resolved, every step: always from a named block's
+/// current output, on while it's `>= 0.5`. No non-block-driven variant exists — even a
+/// permanently-off gate is an explicit `Const(0.0)` wired through a [`BlockKind::Sig2Voltage`],
+/// the same as every other gate — and no bare carrier-comparator variant exists either: that
+/// comparison now lives entirely inside gate-driving `BlockKind`s themselves
+/// ([`BlockKind::Pwm`]/[`BlockKind::PhaseShiftPwm`], or a hand-built chain of ordinary blocks),
+/// so `GateBinding` has exactly one job — reading a number and thresholding it — regardless of
+/// what produced that number: a modulator's own main/complement output, a
+/// [`BlockKind::Hysteresis`] block (no carrier at all, event-driven bang-bang switching), or any
+/// other block a caller composes.
 #[derive(Debug, Clone, PartialEq)]
 pub enum GateBinding {
     /// <!-- component -->
     /// # Gate Binding
-    /// **Purpose:** how a MOSFET's gate state is resolved from a named block, every step.
+    /// **Purpose:** how an ideal switch's gate state is resolved from a named block, every step.
     /// **Library:** Electrical Interface
     ///
     /// ## Description
     /// This is not a `kind=` block itself — it's the `gate=`/`ctrl=` field pair on a
-    /// `kind=mosfet` device line. `GateBinding` has exactly one variant and exactly one job:
-    /// reading a named block's current output and thresholding it at `>= 0.5`. No non-block-
-    /// driven variant exists — even a permanently-off gate is an explicit `Const(0.0)` wired
-    /// through a [`BlockKind::Sig2Voltage`], the same as every other gate. The named block
-    /// (`ctrl=`) must itself be a [`BlockKind::Sig2Voltage`] — a MOSFET's gate is itself a
-    /// voltage ($V_{GS}$ against $v_{th}$), not a distinct discrete-actuation signal domain.
+    /// `kind=ideal_switch` device line. `GateBinding` has exactly one variant and exactly one
+    /// job: reading a named block's current output and thresholding it at `>= 0.5`. No
+    /// non-block-driven variant exists — even a permanently-off gate is an explicit `Const(0.0)`
+    /// wired through a [`BlockKind::Sig2Voltage`], the same as every other gate. The named block
+    /// (`ctrl=`) must itself be a [`BlockKind::Sig2Voltage`] — an ideal switch's gate is itself
+    /// a voltage ($V_{GS}$ against $v_{th}$), not a distinct discrete-actuation signal domain.
     ///
     /// ## Parameters
     /// - `gate=block` — the only accepted value; every gate is block-driven.
     /// - `ctrl=<name>` — the name of a declared [`BlockKind::Sig2Voltage`] block.
     ///
     /// ## Errors
-    /// - `gate=` missing entirely on a `kind=mosfet` line — rejected at parse time: `missing
-    ///   field 'gate' (gate=block ctrl=<name> -- every gate is block-driven, see this file's
-    ///   own module doc comment)`.
+    /// - `gate=` missing entirely on a `kind=ideal_switch` line — rejected at parse time:
+    ///   `missing field 'gate' (gate=block ctrl=<name> -- every gate is block-driven, see this
+    ///   file's own module doc comment)`.
     /// - `gate=` present but not `block` — rejected at parse time: `unknown gate spec '<value>'
     ///   (only gate=block ctrl=<name> exists -- every gate is block-driven)`.
     /// - `ctrl=` naming a block that isn't a [`BlockKind::Sig2Voltage`] — rejected at
@@ -2063,22 +2064,23 @@ pub enum GateBinding {
     ///
     /// ## Netlist form
     /// ```text
-    /// NAME kind=mosfet r_on=<f64> g_breakdown=<f64> v_breakdown=<f64> g_off=<f64> \
+    /// NAME kind=ideal_switch r_on=<f64> g_breakdown=<f64> v_breakdown=<f64> g_off=<f64> \
     ///      v_th=<f64> g_on=<f64> gate=block ctrl=<sig2voltage_block_name>
     /// ```
     ///
     /// ## Example
-    /// A MOSFET permanently held on via a `Const(1)` wired through `Sig2Voltage` — the plain
-    /// `D1 in out mosfetmodel` line gives the electrical connectivity (drain, source; the
-    /// model name is unused for a `kind=mosfet`-overridden device), the same-named `kind=mosfet`
-    /// line supplies the physics and gate. Verified end to end: `V(out)` settles to
-    /// `5 * 1000 / (1000 + 0.1) ≈ 4.9995` (a fully-on 0.1 Ω MOSFET in series with a 1 kΩ load):
+    /// An ideal switch permanently held on via a `Const(1)` wired through `Sig2Voltage` — the
+    /// plain `D1 in out idealswitchmodel` line gives the electrical connectivity (drain, source;
+    /// the model name is unused for a `kind=ideal_switch`-overridden device), the same-named
+    /// `kind=ideal_switch` line supplies the physics and gate. Verified end to end: `V(out)`
+    /// settles to `5 * 1000 / (1000 + 0.1) ≈ 4.9995` (a fully-on 0.1 Ω ideal switch in series
+    /// with a 1 kΩ load):
     /// ```text
     /// ONVAL kind=const value=1
     /// ONGATE kind=sig2voltage in=ONVAL
     /// V1 in 0 5
-    /// D1 in out mosfetmodel
-    /// D1 kind=mosfet r_on=0.1 g_breakdown=0 v_breakdown=-100 g_off=0 v_th=0.5 g_on=5 \
+    /// D1 in out idealswitchmodel
+    /// D1 kind=ideal_switch r_on=0.1 g_breakdown=0 v_breakdown=-100 g_off=0 v_th=0.5 g_on=5 \
     ///      gate=block ctrl=ONGATE
     /// R1 out 0 1k
     /// ```
