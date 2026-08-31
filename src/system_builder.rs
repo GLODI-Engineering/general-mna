@@ -222,18 +222,22 @@ fn parse_xy_points(
     Ok(points)
 }
 
-/// Parses the `ts=`/`freq=`/`to=` fields shared by `kind=cscript`/`kind=pyblock`/`kind=pyfunc`
-/// into a [`SampleTimeSpec`] — `ts=variable` (only when `allow_variable`, i.e. never for
-/// `pyfunc`, which is stateless) selects [`SampleTimeSpec::Variable`]; a numeric `ts=`/`freq=`
-/// selects [`SampleTimeSpec::Periodic`], with `to=` giving its own explicit `offset`
-/// (defaulting to `0.0` when omitted — see [`SampleTimeSpec`]'s own doc comment for why `0.0`,
-/// not `period`, is what actually preserves this project's pre-existing behavior for every
-/// netlist that never used `to=` at all). `to=`, when given, must satisfy `0.0 <= to < period`.
+/// Parses the `ts=`/`freq=`/`to=` fields shared by
+/// `kind=cscript`/`kind=pyblock`/`kind=pyfunc`/`kind=octfunc` into a [`SampleTimeSpec`] —
+/// `ts=variable` (only when `allow_variable`, i.e. never for `pyfunc`/`octfunc`, both
+/// stateless) selects [`SampleTimeSpec::Variable`]; a numeric `ts=`/`freq=` selects
+/// [`SampleTimeSpec::Periodic`], with `to=` giving its own explicit `offset` (defaulting to
+/// `0.0` when omitted — see [`SampleTimeSpec`]'s own doc comment for why `0.0`, not `period`, is
+/// what actually preserves this project's pre-existing behavior for every netlist that never
+/// used `to=` at all). `to=`, when given, must satisfy `0.0 <= to < period`. `kind_str` (the
+/// netlist's own `kind=` token, e.g. `"pyfunc"`/`"octfunc"`) names the specific block kind in
+/// the `ts=variable`-rejected error message when `!allow_variable`; unused otherwise.
 fn parse_sample_time(
     fields: &BTreeMap<String, String>,
     name: &str,
     line_number: usize,
     allow_variable: bool,
+    kind_str: &str,
 ) -> Result<Option<SampleTimeSpec>, String> {
     let get = |key: &str| -> Result<f64, String> {
         fields
@@ -255,10 +259,19 @@ fn parse_sample_time(
 
     if fields.get("ts").map(String::as_str) == Some("variable") {
         if !allow_variable {
+            // pyfunc keeps its own pre-existing exact wording (including the "use kind=pyblock
+            // instead" suggestion -- a real, stateful alternative exists for it); octfunc has no
+            // stateful counterpart in this workspace to suggest switching to, so its own message
+            // simply omits that clause rather than suggesting something that doesn't exist.
+            let suggestion = if kind_str == "pyfunc" {
+                " -- use kind=pyblock instead"
+            } else {
+                ""
+            };
             return Err(format!(
-                "line {}: device '{name}': ts=variable is not available for kind=pyfunc (a \
+                "line {}: device '{name}': ts=variable is not available for kind={kind_str} (a \
                  stateless function call has no instance to remember a requested next-hit \
-                 time against) -- use kind=pyblock instead",
+                 time against){suggestion}",
                 line_number + 1
             ));
         }
@@ -322,7 +335,7 @@ fn parse_required_periodic_sample_time(
     name: &str,
     line_number: usize,
 ) -> Result<SampleTimeSpec, String> {
-    match parse_sample_time(fields, name, line_number, true)? {
+    match parse_sample_time(fields, name, line_number, true, "")? {
         Some(SampleTimeSpec::Periodic { period, offset }) => {
             Ok(SampleTimeSpec::Periodic { period, offset })
         }
@@ -964,7 +977,7 @@ fn build_kind(stmt: &general_spice_core::ast::BlockInstance) -> Result<Kind, Str
                 Some(list) => list.split(',').map(parse_signal).collect(),
                 None => vec![parse_signal(&get_str("in")?)],
             };
-            let sample_time = parse_sample_time(&fields, name, line_number, true)?;
+            let sample_time = parse_sample_time(&fields, name, line_number, true, "cscript")?;
             let xc_count = match fields.get("xc_count") {
                 Some(s) => s.parse::<usize>().map_err(|_| {
                     format!(
@@ -999,7 +1012,7 @@ fn build_kind(stmt: &general_spice_core::ast::BlockInstance) -> Result<Kind, Str
                 Some(list) => list.split(',').map(parse_signal).collect(),
                 None => vec![parse_signal(&get_str("in")?)],
             };
-            let sample_time = parse_sample_time(&fields, name, line_number, true)?;
+            let sample_time = parse_sample_time(&fields, name, line_number, true, "pyblock")?;
             let xc_count = match fields.get("xc_count") {
                 Some(s) => s.parse::<usize>().map_err(|_| {
                     format!(
@@ -1036,10 +1049,37 @@ fn build_kind(stmt: &general_spice_core::ast::BlockInstance) -> Result<Kind, Str
                 Some(list) => list.split(',').map(parse_signal).collect(),
                 None => vec![parse_signal(&get_str("in")?)],
             };
-            let sample_time = parse_sample_time(&fields, name, line_number, false)?;
+            let sample_time = parse_sample_time(&fields, name, line_number, false, "pyfunc")?;
             Kind::Block(BlockInstance {
                 name: name.to_string(),
                 kind: BlockKind::PyFunction {
+                    path,
+                    function,
+                    output_names,
+                    sample_time,
+                },
+                inputs,
+            })
+        }
+        "octfunc" => {
+            // The .m-file counterpart to "pyfunc" above -- identical field set/parsing (see
+            // BlockKind::OctFunc's own doc comment): `function=` required, no default,
+            // ts=variable rejected the same way and with the same wording (a stateless function
+            // call has no instance to remember a next-hit time against).
+            let path = std::path::PathBuf::from(get_str("path")?);
+            let function = get_str("function")?;
+            let output_names = match fields.get("outputs") {
+                Some(names) => names.split(',').map(str::to_string).collect(),
+                None => vec![name.to_string()],
+            };
+            let inputs = match fields.get("inputs") {
+                Some(list) => list.split(',').map(parse_signal).collect(),
+                None => vec![parse_signal(&get_str("in")?)],
+            };
+            let sample_time = parse_sample_time(&fields, name, line_number, false, "octfunc")?;
+            Kind::Block(BlockInstance {
+                name: name.to_string(),
+                kind: BlockKind::OctFunc {
                     path,
                     function,
                     output_names,

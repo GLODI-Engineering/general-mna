@@ -178,7 +178,7 @@ pub enum GainValue {
     Matrix(Vec<Vec<f64>>),
 }
 
-/// How a `CScript`/`PyBlock`/`PyFunction` block's own execution is scheduled, independent of
+/// How a `CScript`/`PyBlock`/`PyFunction`/`OctFunc` block's own execution is scheduled, independent of
 /// the circuit's own resolved step (see each `BlockKind` variant's own `sample_time` field).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum SampleTimeSpec {
@@ -205,8 +205,8 @@ pub enum SampleTimeSpec {
     /// modulator's own scheduled switching instant) rather than fixed at parse time. Requires
     /// the backing `.so`/`.py` to export the corresponding optional next-sample-hit
     /// function/symbol; see `cscript_ffi`'s/`pyblock_ffi`'s own module doc comments. Not
-    /// available for [`BlockKind::PyFunction`] (rejected at parse time) — a stateless function
-    /// call has no instance to remember a requested next-hit time against.
+    /// available for [`BlockKind::PyFunction`]/[`BlockKind::OctFunc`] (rejected at parse time) —
+    /// a stateless function call has no instance to remember a requested next-hit time against.
     Variable,
 }
 
@@ -1758,6 +1758,89 @@ pub enum BlockKind {
         sample_time: Option<SampleTimeSpec>,
     },
     /// <!-- component -->
+    /// # OctFunc
+    /// **Purpose:** call a plain, stateless, named Octave-compatible function once per step.
+    /// **Library:** Extensibility
+    ///
+    /// ## Description
+    /// The `.m`-file counterpart to [`BlockKind::PyFunction`] above -- same genuinely separate,
+    /// stateless contract (no `start`, no persistent state, no `t`/`dt` boilerplate), for
+    /// people with legacy Octave-compatible `.m` scripts instead of Python. `function` (a
+    /// name inside `path`'s own `.m` file, which must itself be named `<function>.m` -- Octave's
+    /// own requirement that a function's file name match its function name) is called with each
+    /// declared `inputs=` entry as its own positional argument (`f(arg0, arg1, ...)`, never
+    /// bundled into one array), returning a single value or as many comma-separated return
+    /// values as `output_names` declares (`[y1, y2] = f(...)`). `output_names`/`sample_time`
+    /// mean the same as `PyFunction`'s own -- still scalar-only outputs, still the same
+    /// zero-order-hold convention -- and there is no `xc_count` here either, for the same reason
+    /// `PyFunction` has none: a purely stateless function has nothing for a continuous state to
+    /// mean.
+    ///
+    /// Unlike `PyFunction`, this block never embeds an interpreter in-process: it calls into a
+    /// separately installed `octave-cli` binary as a subprocess (one shared, persistent process
+    /// for the whole simulation run, spawned lazily on first use), specifically so this
+    /// permissively-licensed project never links against GPLv3-licensed Octave code -- see
+    /// `octave_ffi`'s own module doc comment and `general-simulator`'s own
+    /// `book/dev-guide/src/octave-blocks.md` for the full licensing rationale and the measured
+    /// costs behind this design.
+    ///
+    /// ## Parameters
+    /// - `path=<path>` — the `.m` file containing `function`; its own file name (minus `.m`)
+    ///   must equal `function`. `"double-quote"` a path containing whitespace, same as
+    ///   `CScript`'s `lib=`.
+    /// - `function=<name>` — required, no default; the function called as `f(arg0, arg1, ...)`,
+    ///   and the required base name of `path`'s own file.
+    /// - `outputs=<name1,name2,...>` — output names; defaults to a single output aliasing the
+    ///   block's own `.name`.
+    /// - `in=<signal>` or `inputs=<sig1,sig2,...>` — exactly one of these.
+    /// - `ts=<f64>` / `freq=<f64>` / `to=<f64>` — optional, [`SampleTimeSpec::Periodic`] only;
+    ///   `ts=variable` is rejected (see Errors), for exactly the reason `PyFunction`'s own is.
+    ///
+    /// ## Errors
+    /// - `ts=variable` — rejected at parse time, the same wording `PyFunction` uses (a stateless
+    ///   function call has no instance to remember a requested next-hit time against): `ts=variable
+    ///   is not available for kind=octfunc (a stateless function call has no instance to remember
+    ///   a requested next-hit time against)`.
+    /// - `function` missing — the generic `missing field 'function'` error.
+    /// - `octave-cli` not found on `PATH` when this block is first evaluated, an Octave-side
+    ///   exception raised by the called function, or a malformed/desynchronized reply from the
+    ///   shared session — surfaces as a call-time failure from `octave_ffi` itself (see
+    ///   `octave_ffi::OctaveError`'s own three cases: not-found, process-exited, and Octave-side
+    ///   runtime error), not at parse time.
+    ///
+    /// ## Netlist form
+    /// ```text
+    /// NAME kind=octfunc path=<file.m> function=<name> (in=<signal> | inputs=<sig1,sig2,...>) \
+    ///      [outputs=<name1,name2,...>] [ts=<f64> | freq=<f64> [to=<f64>]]
+    /// ```
+    ///
+    /// ## Example
+    /// Verified end to end against the real CLI (no special feature flag needed -- unlike
+    /// `kind=pyblock`/`kind=pyfunc`, this block builds and runs unconditionally), `SRC=3`
+    /// producing `G1=4`:
+    /// ```text
+    /// SRC kind=const value=3
+    /// G1 kind=octfunc path=add_one.m function=add_one in=SRC
+    /// ```
+    /// where `add_one.m` is:
+    /// ```text
+    /// function y = add_one(x)
+    ///   y = x + 1;
+    /// end
+    /// ```
+    /// `inputs=A,B` calling `f(A, B)` as two genuinely distinct positional arguments is verified
+    /// separately -- see `doc-verify/octfunc/example_two_inputs.cir`.
+    OctFunc {
+        /// The `.m` file containing `function` -- its own base file name must equal `function`.
+        path: std::path::PathBuf,
+        /// The function name called with each declared input as a positional argument.
+        function: String,
+        /// This block's own output names, in order.
+        output_names: Vec<String>,
+        /// `None` runs every resolved circuit step; `Some` must be [`SampleTimeSpec::Periodic`].
+        sample_time: Option<SampleTimeSpec>,
+    },
+    /// <!-- component -->
     /// # Coordinate Transform (Clarke/Park)
     /// **Purpose:** one of the six Clarke/Park three-phase coordinate transforms.
     /// **Library:** Coordinate Transforms
@@ -2162,6 +2245,7 @@ pub fn block_kind_name(kind: &BlockKind) -> &'static str {
         BlockKind::CScript { .. } => "cscript",
         BlockKind::PyBlock { .. } => "pyblock",
         BlockKind::PyFunction { .. } => "pyfunc",
+        BlockKind::OctFunc { .. } => "octfunc",
         BlockKind::CoordinateTransform { kind, .. } => kind.name(),
         BlockKind::Pmsm { .. } => "pmsm",
         BlockKind::Probe(_) => "probe",
