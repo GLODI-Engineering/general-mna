@@ -1841,6 +1841,140 @@ pub enum BlockKind {
         sample_time: Option<SampleTimeSpec>,
     },
     /// <!-- component -->
+    /// # OctBlock
+    /// **Purpose:** call into a user-supplied, *stateful* Octave-compatible function once per
+    /// step -- the Octave-hosted counterpart to [`BlockKind::PyBlock`], and the stateful sibling
+    /// of [`BlockKind::OctFunc`] (not a mode of it -- see that variant's own doc comment for the
+    /// stateless contract this one deliberately does not share).
+    /// **Library:** Extensibility
+    ///
+    /// ## Description
+    /// An escape hatch to Octave-compatible `.m`-file functions with real persistent state
+    /// across steps -- for people with legacy Octave-compatible `.m` scripts who need
+    /// `pyblock`'s own `start`/`output`/`update`/`xc_count` contract, not `octfunc`'s stateless
+    /// one. `output_names`/`sample_time`/`xc_count` all mean exactly what [`BlockKind::PyBlock`]'s
+    /// own do (scalar-only outputs, the same zero-order-hold `sample_time` convention, the same
+    /// solver-integrated-vs-hand-managed `xc` split).
+    ///
+    /// **`path=` names a directory, not a single file** -- the one place this contract cannot
+    /// simply reuse `OctFunc`'s own single-`.m`-file convention: Octave only auto-loads the
+    /// *first* `function ... end` block in a `.m` file by filename, so a second function in the
+    /// same file is an invisible private subfunction (confirmed empirically against real
+    /// `octave-cli`). Every contract function therefore needs **its own file**, named
+    /// `<function>_<role>.m`, all living together in `path`'s own directory:
+    ///
+    /// | File | Required | Signature |
+    /// |---|---|---|
+    /// | `<function>_start.m` | always | `state = <function>_start()` |
+    /// | `<function>.m` | unless `xc_count>0` | `[new_state, y1, y2, ...] = <function>(state, t, dt, u1, u2, ...)` |
+    /// | `<function>_derivative.m` | only if `xc_count>0` | `xc_dot = <function>_derivative(state, u1, ..., xc)` -- pure, must not mutate `state`; called up to 4x/step (RK4 stages), including from discarded trial steps under adaptive stepping |
+    /// | `<function>_output_xc.m` | only if `xc_count>0` | `[new_state, y1, ...] = <function>_output_xc(state, t, dt, u1, ..., xc)` -- `xc` here is this step's own already-integrated continuous state |
+    /// | `<function>_update.m` | optional | `new_state = <function>_update(state, t, dt, u1, ...)` -- called once per resolved step, after output; if absent, `output`/`output_xc`'s own returned `new_state` is the only state advance |
+    /// | `<function>_next_sample_hit.m` | only if `ts=variable` | `seconds = <function>_next_sample_hit(state, t, dt, u1, ...)` |
+    ///
+    /// A user coming from Octave/legacy-language habits of "one script, many local functions"
+    /// hits this immediately -- this is not a buried caveat, it is the load-bearing difference
+    /// from every other block kind's own `path=`.
+    ///
+    /// Each instance's own opaque `state` (whatever `<function>_start` returns) lives entirely
+    /// **inside the shared Octave session itself**, in one global struct keyed by this block's
+    /// own instance name (`global __gs_state; __gs_state.('<name>') = ...`) -- it is never
+    /// serialized back into Rust at all, unlike `PyBlock`'s own `state` (an opaque Python
+    /// object `pyblock_ffi` holds a handle to) or `CScript`'s (an opaque `void*`). Two instances
+    /// of the *same* Octave function never contaminate each other's state -- validated directly
+    /// against real `octave-cli` (interleaved calls, zero cross-contamination; see
+    /// `octave_ffi::OctaveSession`'s own `tests/stateful_session.rs`). The one piece of state
+    /// that *does* cross the pipe as explicit numeric data (the same `%.17g`-per-line protocol
+    /// `octfunc` already uses, extended to a literal Octave vector) is the solver-owned `xc`
+    /// continuous-state vector for the `xc_count > 0` case -- that's the *solver's* state, not
+    /// the block's own opaque one, so it has to be explicit, exactly mirroring `cscript`'s/
+    /// `pyblock`'s own `xc` vs. opaque-`state` split. See `general-simulator`'s own
+    /// `book/dev-guide/src/octave-blocks.md` for the full protocol, licensing rationale, and
+    /// measured costs.
+    ///
+    /// Like `OctFunc`, this block shares **one** persistent `octave-cli` subprocess with every
+    /// other Octave-hosted block kind in the same run (spawned lazily, on first use) -- never a
+    /// second process.
+    ///
+    /// ## Parameters
+    /// - `path=<dir>` — the directory containing `<function>_*.m` (see the file table above).
+    ///   `"double-quote"` a path containing whitespace, same as `CScript`'s `lib=`.
+    /// - `function=<name>` — required, no default; the base name every `<function>_<role>.m`
+    ///   file shares.
+    /// - `outputs=<name1,name2,...>` — output names; defaults to a single output aliasing the
+    ///   block's own `.name`.
+    /// - `in=<signal>` or `inputs=<sig1,sig2,...>` — exactly one of these.
+    /// - `ts=<f64>` / `freq=<f64>` / `to=<f64>` / `ts=variable` — optional; see
+    ///   [`SampleTimeSpec`]. `ts=variable` here requires `<function>_next_sample_hit.m` to also
+    ///   exist in `path`'s own directory.
+    /// - `xc_count=<usize>` — optional, default `0`.
+    ///
+    /// ## Errors
+    /// - `path`/`function`/`in` missing, or malformed `outputs=`/`xc_count=` — same generic/
+    ///   `xc_count` errors as [`BlockKind::CScript`].
+    /// - A required `<function>_*.m` file missing from `path`'s own directory (per the file
+    ///   table above, given this block's own `xc_count`/`ts=`) — checked once, up front, at
+    ///   construction time, *before* `octave-cli` is ever asked about it: `dae_runtime::DaeError
+    ///   ::OctBlockMissingRequiredFile { block_name, expected_path }`.
+    /// - `ts=variable` without `<function>_next_sample_hit.m` present — checked the same way:
+    ///   `dae_runtime::DaeError::OctBlockRequiresNextSampleHitForVariableSampleTime`.
+    /// - `octave-cli` not found on `PATH`, an Octave-side exception raised by a called function,
+    ///   or a malformed/desynchronized reply — surfaces as a call-time failure from `octave_ffi`
+    ///   itself (`dae_runtime::DaeError::Octave`), not at parse time.
+    /// - **`kind=octblock` does not support `TimeStep::Adaptive`** — this instance's own opaque
+    ///   state lives inside the one shared `octave-cli` session, which is never cloned, so a
+    ///   rejected adaptive trial step's own state-mutating calls could not be rolled back; a
+    ///   netlist using `kind=octblock` under an adaptive run fails at construction with
+    ///   `dae_runtime::DaeError::OctBlockDoesNotSupportAdaptiveStep { block_name }`. Use a fixed
+    ///   `--dt`.
+    ///
+    /// ## Netlist form
+    /// ```text
+    /// NAME kind=octblock path=<dir> function=<name> (in=<signal> | inputs=<sig1,sig2,...>) \
+    ///      [outputs=<name1,name2,...>] [ts=<f64>|freq=<f64> [to=<f64>] | ts=variable] \
+    ///      [xc_count=<usize>]
+    /// ```
+    ///
+    /// ## Example
+    /// A stateful accumulator (`out = state + in`, state advances by `in` every step) verified
+    /// end to end against the real CLI, `SRC=3` producing `G1=3,6,9,...` across successive
+    /// steps:
+    /// ```text
+    /// SRC kind=const value=3
+    /// G1 kind=octblock path=accum function=accumulate in=SRC
+    /// ```
+    /// where `accum/accumulate_start.m` is:
+    /// ```text
+    /// function state = accumulate_start()
+    ///   state = 0;
+    /// end
+    /// ```
+    /// and `accum/accumulate.m` is:
+    /// ```text
+    /// function [new_state, y] = accumulate(state, t, dt, u)
+    ///   new_state = state + u;
+    ///   y = new_state;
+    /// end
+    /// ```
+    /// The `xc_count>0` contract (`_derivative`/`_output_xc`) is verified separately end to end
+    /// against its own analytic solution ($\dot{x}_c = 1 - x_c$, starting at rest, so
+    /// $x_c(t) = 1 - e^{-t}$) — see `doc-verify/octblock/xc_example.cir`, mirroring
+    /// `doc-verify/pyblock/xc_example.cir`'s own precedent.
+    OctBlock {
+        /// The directory containing `<function>_start.m`, `<function>.m` (or
+        /// `<function>_derivative.m`/`<function>_output_xc.m`), and optionally
+        /// `<function>_update.m`/`<function>_next_sample_hit.m`.
+        path: std::path::PathBuf,
+        /// The shared base name every `<function>_<role>.m` file in `path` uses.
+        function: String,
+        /// This block's own output names, in order.
+        output_names: Vec<String>,
+        /// `None` runs every resolved circuit step; `Some` runs on its own schedule.
+        sample_time: Option<SampleTimeSpec>,
+        /// Number of solver-integrated continuous states this block owns; `0` for the plain contract.
+        xc_count: usize,
+    },
+    /// <!-- component -->
     /// # Coordinate Transform (Clarke/Park)
     /// **Purpose:** one of the six Clarke/Park three-phase coordinate transforms.
     /// **Library:** Coordinate Transforms
@@ -2246,6 +2380,7 @@ pub fn block_kind_name(kind: &BlockKind) -> &'static str {
         BlockKind::PyBlock { .. } => "pyblock",
         BlockKind::PyFunction { .. } => "pyfunc",
         BlockKind::OctFunc { .. } => "octfunc",
+        BlockKind::OctBlock { .. } => "octblock",
         BlockKind::CoordinateTransform { kind, .. } => kind.name(),
         BlockKind::Pmsm { .. } => "pmsm",
         BlockKind::Probe(_) => "probe",

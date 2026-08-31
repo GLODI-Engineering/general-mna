@@ -1088,6 +1088,45 @@ fn build_kind(stmt: &general_spice_core::ast::BlockInstance) -> Result<Kind, Str
                 inputs,
             })
         }
+        "octblock" => {
+            // The stateful sibling of "octfunc" above (not a mode of it -- see
+            // BlockKind::OctBlock's own doc comment): same output_names/inputs/sample_time/
+            // xc_count field shape "pyblock" uses (ts=variable allowed), plus `function=`
+            // required the way "octfunc"/"pyfunc" both require it -- `path=` here names a
+            // *directory* (the file-per-function contract), not a single `.m` file.
+            let path = std::path::PathBuf::from(get_str("path")?);
+            let function = get_str("function")?;
+            let output_names = match fields.get("outputs") {
+                Some(names) => names.split(',').map(str::to_string).collect(),
+                None => vec![name.to_string()],
+            };
+            let inputs = match fields.get("inputs") {
+                Some(list) => list.split(',').map(parse_signal).collect(),
+                None => vec![parse_signal(&get_str("in")?)],
+            };
+            let sample_time = parse_sample_time(&fields, name, line_number, true, "octblock")?;
+            let xc_count = match fields.get("xc_count") {
+                Some(s) => s.parse::<usize>().map_err(|_| {
+                    format!(
+                        "line {}: device '{name}' field 'xc_count' is not a non-negative \
+                         integer",
+                        line_number + 1
+                    )
+                })?,
+                None => 0,
+            };
+            Kind::Block(BlockInstance {
+                name: name.to_string(),
+                kind: BlockKind::OctBlock {
+                    path,
+                    function,
+                    output_names,
+                    sample_time,
+                    xc_count,
+                },
+                inputs,
+            })
+        }
         "statespace" => {
             let a = parse_matrix_rows(&get_str("a")?, name, "a", line_number)?;
             // `b=`/`c=` accept either their original SISO shorthand (a flat list -- `b=[1,0]`
