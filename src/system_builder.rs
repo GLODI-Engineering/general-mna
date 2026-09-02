@@ -17,8 +17,8 @@ use general_spice_core::{lexer, parser};
 use pwl_devices::{IdealDiode, IdealSwitch};
 
 use crate::block_graph::{
-    BlockInstance, BlockKind, ConstValue, GainValue, GateBinding, PidClamp, ProbeTarget,
-    SampleTimeSpec, Signal,
+    BlockInstance, BlockKind, ConstValue, GainValue, GateBinding, Phys2SigTarget, PhysicalDomain,
+    PidClamp, SampleTimeSpec, Signal,
 };
 use crate::hierarchy;
 use crate::{MnaBuilder, MnaSystem, TransientFunction};
@@ -99,6 +99,13 @@ pub fn build_system(source: &str, dialect: Dialect) -> Result<System, String> {
     let mut gates = BTreeMap::new();
     let mut blocks = Vec::new();
     let mut shared_r_on: Option<f64> = None;
+    // (phys2sig name, branch=<name>, 1-based line number) for every `kind=phys2sig
+    // branch=<name>` block -- checked below, once `mna.unknowns` (and every element's own name)
+    // is fully known, against the classic MNA footgun: `branch=` naming an element with no
+    // current unknown at all (only V/L/E/H sources get one -- see
+    // `MnaBuilder::is_branch_device`), which used to silently read back 0.0 forever instead of
+    // erroring.
+    let mut phys2sig_branch_checks: Vec<(String, String, usize)> = Vec::new();
 
     for stmt in &statements {
         let Statement::BlockInstance(bi) = stmt else {
@@ -127,8 +134,45 @@ pub fn build_system(source: &str, dialect: Dialect) -> Result<System, String> {
                 gates.insert(bi.name.clone(), gate);
                 ideal_switches.insert(bi.name.clone(), ideal_switch);
             }
-            Kind::Block(instance) => blocks.push(instance),
+            Kind::Block(instance) => {
+                if let BlockKind::Phys2Sig(Phys2SigTarget::Current(branch)) = &instance.kind {
+                    let line_number = bi.span.start.saturating_sub(1);
+                    phys2sig_branch_checks.push((
+                        instance.name.clone(),
+                        branch.clone(),
+                        line_number,
+                    ));
+                }
+                blocks.push(instance);
+            }
         }
+    }
+
+    for (phys2sig_name, branch, line_number) in &phys2sig_branch_checks {
+        let unknown = format!("I({branch})");
+        if mna.unknowns.iter().any(|u| u == &unknown) {
+            continue;
+        }
+        let element_exists = statements.iter().any(|s| {
+            matches!(
+                s,
+                Statement::ElementInstance(e) if e.name.eq_ignore_ascii_case(branch)
+            )
+        });
+        if element_exists {
+            return Err(format!(
+                "line {}: device '{phys2sig_name}' kind='phys2sig' branch='{branch}' has no \
+                 current unknown available (only V/L/E/H sources carry a branch-current \
+                 unknown) -- insert a 0V voltage source in series in the branch you want to \
+                 measure and probe its current instead",
+                line_number + 1
+            ));
+        }
+        return Err(format!(
+            "line {}: device '{phys2sig_name}' kind='phys2sig' branch='{branch}' names no such \
+             element",
+            line_number + 1
+        ));
     }
 
     Ok(System {
@@ -555,9 +599,9 @@ fn build_kind(stmt: &general_spice_core::ast::BlockInstance) -> Result<Kind, Str
             // Every gate is block-driven -- gate=block ctrl=<name>, reading that block's
             // current output (>= 0.5 means on). No other gate= spelling exists: a
             // permanently-off gate is an explicit `Const(0.0)` wired through
-            // `kind=sig2voltage` (an ideal switch's gate is itself a voltage, the same
-            // Signal-to-PS boundary a V-source's own magnitude uses -- no dedicated gate-only
-            // converter).
+            // `kind=sig2phys domain=voltage` (an ideal switch's gate is itself a voltage, the
+            // same Signal-to-PS boundary a V-source's own magnitude uses -- no dedicated
+            // gate-only converter).
             let gate = match fields.get("gate").map(String::as_str) {
                 Some("block") => GateBinding::Block(get_str("ctrl")?),
                 Some(other) => {
@@ -1348,21 +1392,21 @@ fn build_kind(stmt: &general_spice_core::ast::BlockInstance) -> Result<Kind, Str
                 inputs: vec![parse_signal(&get_str("in")?)],
             })
         }
-        "probe" => {
+        "phys2sig" => {
             let target = match (fields.get("node"), fields.get("branch")) {
-                (Some(node), None) => ProbeTarget::Voltage(node.clone()),
-                (None, Some(branch)) => ProbeTarget::Current(branch.clone()),
+                (Some(node), None) => Phys2SigTarget::Voltage(node.clone()),
+                (None, Some(branch)) => Phys2SigTarget::Current(branch.clone()),
                 (Some(_), Some(_)) => {
                     return Err(format!(
                         "line {}: device '{name}': 'node' and 'branch' are mutually \
-                             exclusive (a probe reads either a node voltage or a branch \
+                             exclusive (a phys2sig reads either a node voltage or a branch \
                              current, never both)",
                         line_number + 1
                     ))
                 }
                 (None, None) => {
                     return Err(format!(
-                        "line {}: device '{name}' kind='probe' needs 'node=<name>' (reads \
+                        "line {}: device '{name}' kind='phys2sig' needs 'node=<name>' (reads \
                              V(node)) or 'branch=<name>' (reads I(branch))",
                         line_number + 1
                     ))
@@ -1370,20 +1414,28 @@ fn build_kind(stmt: &general_spice_core::ast::BlockInstance) -> Result<Kind, Str
             };
             Kind::Block(BlockInstance {
                 name: name.to_string(),
-                kind: BlockKind::Probe(target),
+                kind: BlockKind::Phys2Sig(target),
                 inputs: Vec::new(),
             })
         }
-        "sig2voltage" => Kind::Block(BlockInstance {
-            name: name.to_string(),
-            kind: BlockKind::Sig2Voltage,
-            inputs: vec![parse_signal(&get_str("in")?)],
-        }),
-        "sig2current" => Kind::Block(BlockInstance {
-            name: name.to_string(),
-            kind: BlockKind::Sig2Current,
-            inputs: vec![parse_signal(&get_str("in")?)],
-        }),
+        "sig2phys" => {
+            let domain = match get_str("domain")?.as_str() {
+                "voltage" => PhysicalDomain::Voltage,
+                "current" => PhysicalDomain::Current,
+                other => {
+                    return Err(format!(
+                        "line {}: device '{name}' field 'domain' must be 'voltage' or \
+                             'current' (got '{other}')",
+                        line_number + 1
+                    ))
+                }
+            };
+            Kind::Block(BlockInstance {
+                name: name.to_string(),
+                kind: BlockKind::Sig2Phys { domain },
+                inputs: vec![parse_signal(&get_str("in")?)],
+            })
+        }
         "clarke" | "clarkeinv" | "park" | "parkinv" | "clarkepark" | "clarkeparkinv" => {
             let ct = match kind {
                 "clarke" => CoordinateTransform::Clarke,

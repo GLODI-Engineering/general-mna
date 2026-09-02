@@ -64,7 +64,7 @@ fn an_ideal_switch_line_correlates_by_name_with_its_block_gate() {
     // line sharing that name -- a real structural correlation-by-name, not a coincidence.
     let source = "V1 vin 0 400\nD1 vin vx idealswitchmodel\nR1 vx 0 1000\n\
                   OFFVAL kind=const value=0\n\
-                  OFFGATE kind=sig2voltage in=OFFVAL\n\
+                  OFFGATE kind=sig2phys domain=voltage in=OFFVAL\n\
                   D1 kind=ideal_switch r_on=0.01 g_breakdown=0 v_breakdown=-1e6 g_off=1e-6 \
                   v_th=1e6 g_on=0 gate=block ctrl=OFFGATE\n";
     let System {
@@ -92,6 +92,40 @@ fn mismatched_ideal_switch_r_on_is_a_clear_error() {
                   g_on=1 gate=block ctrl=G\n";
     let err = build_system(source, Dialect::Ngspice).unwrap_err();
     assert!(err.contains("same r_on"), "unexpected error: {err}");
+}
+
+#[test]
+fn a_phys2sig_branch_naming_a_v_source_builds_fine() {
+    // V is a branch device (has an MNA branch-current unknown) -- the ordinary, supported case.
+    let source = "V1 a 0 5\nR1 a 0 1000\nIMEAS kind=phys2sig branch=V1\n";
+    let System { blocks, .. } = build_system(source, Dialect::Ngspice).unwrap();
+    assert_eq!(blocks.len(), 1);
+}
+
+#[test]
+fn a_phys2sig_branch_naming_a_non_branch_device_is_a_clear_build_time_error() {
+    // R1 is a resistor -- not V/L/E/H -- so it has no branch-current unknown at all. Must be a
+    // hard build-time error (not a silent 0.0 read-back), and must suggest the ammeter fix.
+    let source = "V1 a 0 5\nR1 a 0 1000\nIMEAS kind=phys2sig branch=R1\n";
+    let err = build_system(source, Dialect::Ngspice).unwrap_err();
+    assert!(
+        err.contains("has no current unknown available"),
+        "unexpected error: {err}"
+    );
+    assert!(
+        err.contains("insert a 0V voltage source in series"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn a_phys2sig_branch_naming_a_nonexistent_element_is_a_distinct_clear_error() {
+    let source = "V1 a 0 5\nR1 a 0 1000\nIMEAS kind=phys2sig branch=NOPE\n";
+    let err = build_system(source, Dialect::Ngspice).unwrap_err();
+    assert!(
+        err.contains("names no such element"),
+        "unexpected error: {err}"
+    );
 }
 
 #[test]

@@ -1,6 +1,6 @@
 //! The block/signal-domain type vocabulary: `BlockKind`/`BlockInstance` (one named block and
 //! what it computes), `Signal` (where a block's input comes from), `GateBinding` (how a
-//! an ideal switch's gate state resolves from a block's output), `ProbeTarget`/`PidClamp` (the two
+//! an ideal switch's gate state resolves from a block's output), `Phys2SigTarget`/`PidClamp` (the two
 //! `BlockKind` variants complex enough to need their own payload type). Moved here from
 //! `dae-runtime` (Phase 2 of the format-unification plan — see `general-simulator`'s own
 //! `docs/journal/`): `general-mna` is now the single place a netlist's *meaning* is built, both
@@ -16,7 +16,7 @@
 //!
 //! **There is no separate "closed-loop mode," and no non-block-driven gate at all** — every
 //! [`GateBinding`] is `Block(name)`, reading a named block's current output (`>= 0.5` means
-//! on), whether that block's own input chain traces back to a [`BlockKind::Probe`] of the
+//! on), whether that block's own input chain traces back to a [`BlockKind::Phys2Sig`] of the
 //! circuit's own state or is just a `Const` — both are resolved by exactly the same code, every
 //! step, because from the solver's point of view they're the same kind of question: "what's
 //! this device's terminal condition right now."
@@ -37,9 +37,9 @@ use crate::{SwitchState, TransientFunction};
 /// Where a block's input value comes from: another block's output this same step, or that (or
 /// any) block's own output from the *previous* step. There is deliberately **no** variant that
 /// reads a circuit quantity (`V(node)`/`I(branch)`) directly — that crossing from the physical
-/// domain into the signal domain must go through an explicit, named [`BlockKind::Probe`] block
+/// domain into the signal domain must go through an explicit, named [`BlockKind::Phys2Sig`] block
 /// instead (referenced afterward like any other block, via `Signal::Block`). See
-/// [`BlockKind::Probe`]'s own doc comment for why this boundary is enforced rather than
+/// [`BlockKind::Phys2Sig`]'s own doc comment for why this boundary is enforced rather than
 /// implicit, the same way a real block-diagram tool requires an explicit physical/signal
 /// converter block between a physical port and a signal port instead of wiring them together
 /// directly.
@@ -125,11 +125,11 @@ impl SignalValue {
     }
 }
 
-/// What a [`BlockKind::Probe`] reads from the circuit's own previous-step operating point —
+/// What a [`BlockKind::Phys2Sig`] reads from the circuit's own previous-step operating point —
 /// `V(node)` or `I(branch)`, anything `OperatingPoint::value` (in `dae-runtime`) accepts, keyed by exactly the
 /// same `V(...)`/`I(...)` naming convention `general-mna` itself uses for MNA unknowns.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ProbeTarget {
+pub enum Phys2SigTarget {
     /// `V(node)` — the named node's voltage.
     Voltage(String),
     /// `I(branch)` — the named branch's current.
@@ -2086,7 +2086,7 @@ pub enum BlockKind {
         output_names: Vec<String>,
     },
     /// <!-- component -->
-    /// # Probe (Physical-to-Signal Converter)
+    /// # Phys2Sig (Physical-to-Signal Converter)
     /// **Purpose:** the only way a circuit quantity enters the signal domain.
     /// **Library:** Electrical Interface
     ///
@@ -2098,6 +2098,9 @@ pub enum BlockKind {
     /// block-diagram simulation tool requires: a physical port and a signal port are
     /// type-distinct there and cannot be wired together without one of these in between — the
     /// same rule, enforced the same way, at the netlist level instead of a GUI's wiring canvas.
+    /// Named symmetrically with [`BlockKind::Sig2Phys`] (its write-direction counterpart):
+    /// `phys2sig` reads a circuit quantity into the signal domain, `sig2phys` drives a
+    /// signal-domain value onto a circuit quantity.
     ///
     /// ## Parameters
     /// - `node=<name>` — reads `V(node)`. Mutually exclusive with `branch=`.
@@ -2105,64 +2108,98 @@ pub enum BlockKind {
     ///
     /// ## Errors
     /// - Both `node=` and `branch=` given — rejected at parse time: `'node' and 'branch' are
-    ///   mutually exclusive (a probe reads either a node voltage or a branch current, never
+    ///   mutually exclusive (a phys2sig reads either a node voltage or a branch current, never
     ///   both)`.
-    /// - Neither given — rejected at parse time: `kind='probe' needs 'node=<name>' (reads
+    /// - Neither given — rejected at parse time: `kind='phys2sig' needs 'node=<name>' (reads
     ///   V(node)) or 'branch=<name>' (reads I(branch))`.
+    /// - `branch=<name>` naming an element that has no MNA branch-current unknown at all —
+    ///   rejected at build time (once the full circuit is known), not silently read back as
+    ///   `0.0`: only `V`/`L`/`E` (VCVS)/`H` (CCVS) elements carry a branch-current unknown (see
+    ///   `MnaBuilder::is_branch_device`); naming anything else (a resistor, a capacitor, a
+    ///   diode, an ideal switch, ...) is `line N: device '<name>' kind='phys2sig'
+    ///   branch='<branch>' has no current unknown available (only V/L/E/H sources carry a
+    ///   branch-current unknown) -- insert a 0V voltage source in series in the branch you want
+    ///   to measure and probe its current instead` — the standard SPICE "ammeter" idiom: a 0V
+    ///   source in series perturbs nothing electrically, but (being a `V` element) gets its own
+    ///   branch-current unknown for free, which `branch=` can then read.
+    /// - `branch=<name>` naming an element that doesn't exist anywhere in the netlist at all
+    ///   (not just the wrong type) — a distinct build-time error: `line N: device '<name>'
+    ///   kind='phys2sig' branch='<branch>' names no such element`.
     ///
     /// ## Netlist form
     /// ```text
-    /// NAME kind=probe node=<node_name>
-    /// NAME kind=probe branch=<branch_name>
+    /// NAME kind=phys2sig node=<node_name>
+    /// NAME kind=phys2sig branch=<branch_name>
     /// ```
     ///
     /// ## Example
-    /// Probing a resistor-divider node's own voltage — verified end to end, `PROBE1` tracking
+    /// Reading a resistor-divider node's own voltage — verified end to end, `PROBE1` tracking
     /// `V(out)` exactly:
     /// ```text
     /// V1 in 0 5
     /// R1 in out 1k
     /// R2 out 0 1k
-    /// PROBE1 kind=probe node=out
+    /// PROBE1 kind=phys2sig node=out
     /// ```
-    Probe(ProbeTarget),
+    ///
+    /// The ammeter idiom — measuring the current through `R1` (which has no branch-current
+    /// unknown of its own) by inserting a 0V source `VAMM` in series and reading *that* instead;
+    /// verified end to end, `IMEAS` tracking `5 / (1000 + 1000) = 0.0025` A exactly (the 0V
+    /// source doesn't perturb the divider at all):
+    /// ```text
+    /// V1 in 0 5
+    /// VAMM in mid 0
+    /// R1 mid out 1000
+    /// R2 out 0 1000
+    /// IMEAS kind=phys2sig branch=VAMM
+    /// ```
+    Phys2Sig(Phys2SigTarget),
     /// <!-- component -->
-    /// # Sig2Voltage (Signal-to-Physical Converter)
-    /// **Purpose:** the only legal way a signal-domain block's output drives a voltage source's
+    /// # Sig2Phys (Signal-to-Physical Converter)
+    /// **Purpose:** the only legal way a signal-domain block's output drives a `V`/`I` source's
     /// magnitude or an ideal switch's gate.
     /// **Library:** Electrical Interface
     ///
     /// ## Description
-    /// Closes the write-direction gap [`BlockKind::Probe`] doesn't (a probe only ever reads). A
-    /// `V` element's own literal value field in the netlist names this block directly (e.g.
-    /// `V1 a 0 VDRV`, where `VDRV` is a declared `Sig2Voltage` block) — `general-mna`'s own
+    /// Closes the write-direction gap [`BlockKind::Phys2Sig`] doesn't (a phys2sig only ever
+    /// reads). A
+    /// `V`/`I` element's own literal value field in the netlist names this block directly (e.g.
+    /// `V1 a 0 VDRV`, where `VDRV` is a declared `domain=voltage` block) — `general-mna`'s own
     /// `Expression::parse_scalar` already accepts a bare symbol there with no change needed on
     /// that side; `dae-runtime` requires, at validation time, that any such symbol naming a
-    /// declared block resolve to exactly this kind (`DaeError::SourceNotSig2PhysicalConverter`
-    /// otherwise), and every step, substitutes this block's own just-computed output value into
-    /// the circuit solve in that symbol's place.
+    /// declared block resolve to exactly this kind with the matching `domain` for the device
+    /// letter driving it (`V` requires `domain=voltage`, `I` requires `domain=current`) —
+    /// `DaeError::SourceNotSig2PhysicalConverter` otherwise — and every step, substitutes this
+    /// block's own just-computed output value into the circuit solve in that symbol's place.
     ///
-    /// Also the *only* legal target for a [`GateBinding::Block`]'s own named block —
-    /// `dae-runtime` rejects a `GateBinding` naming anything else with
-    /// `DaeError::GateTargetNotSig2Voltage`. An ideal switch's gate is itself a voltage (`V_GS`
-    /// against `v_th`), not a distinct discrete-actuation signal domain, so there is no
-    /// separate gate-only converter — one type, `Sig2Voltage`, is the whole Signal-to-PS
-    /// boundary for "a signal-domain block's output drives a physical voltage," whether that
-    /// voltage happens to source a node or gate a switch. Purely an identity pass-through
-    /// numerically (`value = input`) in both roles; the type-distinct name is what the
-    /// enforcement keys on. One input.
+    /// Also the *only* legal target for a [`GateBinding::Block`]'s own named block, and there
+    /// *only* the `domain=voltage` form — `dae-runtime` rejects a `GateBinding` naming anything
+    /// else, including a `domain=current` `Sig2Phys`, with `DaeError::GateTargetNotSig2Voltage`.
+    /// An ideal switch's gate is itself a voltage (`V_GS` against `v_th`), not a distinct
+    /// discrete-actuation signal domain, so there is no separate gate-only converter — one type,
+    /// `Sig2Phys`, parameterized by [`PhysicalDomain`], is the whole Signal-to-PS boundary for
+    /// "a signal-domain block's output drives a physical voltage or current," whether that
+    /// voltage happens to source a node, gate a switch, or drive a current source. Purely an
+    /// identity pass-through numerically (`value = input`) in every role; the `domain` field is
+    /// what the enforcement keys on. One input.
     ///
     /// ## Parameters
+    /// - `domain=<voltage|current>` — which physical quantity this converter drives. Required.
     /// - `in=<signal>` — the value to drive onto the physical side (one input).
     ///
     /// ## Errors
-    /// None specific to this `kind=` beyond the generic missing-field error — every real
-    /// enforcement (a `V`/gate target actually naming a `Sig2Voltage`) happens at
-    /// `dae-runtime`'s validation stage, not netlist parse time.
+    /// - `domain=` missing entirely — rejected at parse time: `line N: device '<name>' missing
+    ///   field 'domain'`.
+    /// - `domain=` present but not `voltage`/`current` — rejected at parse time: `line N: device
+    ///   '<name>' field 'domain' must be 'voltage' or 'current' (got '<value>')`.
+    /// - Beyond that, none specific to this `kind=` — every real enforcement (a `V`/`I`/gate
+    ///   target actually naming a `Sig2Phys` of the right domain) happens at `dae-runtime`'s
+    ///   validation stage, not netlist parse time.
     ///
     /// ## Netlist form
     /// ```text
-    /// NAME kind=sig2voltage in=<signal>
+    /// NAME kind=sig2phys domain=voltage in=<signal>
+    /// NAME kind=sig2phys domain=current in=<signal>
     /// ```
     ///
     /// ## Example
@@ -2170,50 +2207,44 @@ pub enum BlockKind {
     /// `Const` through the converter exactly:
     /// ```text
     /// CMD kind=const value=5
-    /// VDRV kind=sig2voltage in=CMD
+    /// VDRV kind=sig2phys domain=voltage in=CMD
     /// V1 a 0 VDRV
     /// R1 a 0 1k
     /// ```
-    Sig2Voltage,
-    /// <!-- component -->
-    /// # Sig2Current (Signal-to-Physical Converter)
-    /// **Purpose:** the [`BlockKind::Sig2Voltage`] counterpart for an `I` (independent current
-    /// source) element's own literal value field.
-    /// **Library:** Electrical Interface
     ///
-    /// ## Description
-    /// Identical role and enforcement to [`BlockKind::Sig2Voltage`], for an `I` source's
-    /// magnitude instead of a `V` source's. One input.
-    ///
-    /// ## Parameters
-    /// - `in=<signal>` — the value to drive onto the physical side (one input).
-    ///
-    /// ## Errors
-    /// None specific to this `kind=` beyond the generic missing-field error (see
-    /// [`BlockKind::Sig2Voltage`]'s own Errors).
-    ///
-    /// ## Netlist form
-    /// ```text
-    /// NAME kind=sig2current in=<signal>
-    /// ```
-    ///
-    /// ## Example
     /// A block-driven current source — verified end to end, `I1`'s magnitude tracking a
     /// `Const` through the converter exactly:
     /// ```text
     /// CMD kind=const value=0.1
-    /// IDRV kind=sig2current in=CMD
+    /// IDRV kind=sig2phys domain=current in=CMD
     /// I1 a 0 IDRV
     /// R1 a 0 1k
     /// ```
-    Sig2Current,
+    Sig2Phys {
+        /// Which physical quantity this converter drives — `V`-source targets and
+        /// `GateBinding::Block` targets require `Voltage`; `I`-source targets require
+        /// `Current`.
+        domain: PhysicalDomain,
+    },
+}
+
+/// Which physical quantity a [`BlockKind::Sig2Phys`] converter drives. Purely a type-level tag
+/// for the enforcement sites in `dae-runtime` (`DaeError::GateTargetNotSig2Voltage`,
+/// `DaeError::SourceNotSig2PhysicalConverter`) — evaluation itself (`value = input`) is
+/// identical for both.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PhysicalDomain {
+    /// Drives a `V` source's magnitude, or a [`GateBinding::Block`] target.
+    Voltage,
+    /// Drives an `I` source's magnitude.
+    Current,
 }
 
 /// One named block instance and where its inputs (if any) come from.
-/// `Const`/`Pwc`/`Pwl`/`Waveform`/`Probe` blocks must have zero inputs; `Sum`/`Product` need one
+/// `Const`/`Pwc`/`Pwl`/`Waveform`/`Phys2Sig` blocks must have zero inputs; `Sum`/`Product` need one
 /// input per sign/factor; `Gain`/
-/// `StateSpace`/`TransferFunction`/`Vco`/`Saturation`/`Table`/`MathFn1`/`Sig2Voltage`/
-/// `Sig2Current` each need exactly one; `Pid` needs exactly one (the error signal)
+/// `StateSpace`/`TransferFunction`/`Vco`/`Saturation`/`Table`/`MathFn1`/`Sig2Phys`
+/// each need exactly one; `Pid` needs exactly one (the error signal)
 /// when its `clamp` is `PidClamp::Fixed`, or exactly three (`error, clamp_lo, clamp_hi`, in that
 /// order) when `PidClamp::Dynamic`; `MathFn2` needs two; `MathFn3` needs three;
 /// `CoordinateTransform` needs `kind.input_count()` (3 for `Clarke`/`ClarkeInv`, 4 for the
@@ -2241,7 +2272,8 @@ pub struct BlockInstance {
 
 /// How one ideal switch's gate state is resolved, every step: always from a named block's
 /// current output, on while it's `>= 0.5`. No non-block-driven variant exists — even a
-/// permanently-off gate is an explicit `Const(0.0)` wired through a [`BlockKind::Sig2Voltage`],
+/// permanently-off gate is an explicit `Const(0.0)` wired through a `domain=voltage`
+/// [`BlockKind::Sig2Phys`],
 /// the same as every other gate — and no bare carrier-comparator variant exists either: that
 /// comparison now lives entirely inside gate-driving `BlockKind`s themselves
 /// ([`BlockKind::Pwm`]/[`BlockKind::PhaseShiftPwm`], or a hand-built chain of ordinary blocks),
@@ -2261,13 +2293,15 @@ pub enum GateBinding {
     /// `kind=ideal_switch` device line. `GateBinding` has exactly one variant and exactly one
     /// job: reading a named block's current output and thresholding it at `>= 0.5`. No
     /// non-block-driven variant exists — even a permanently-off gate is an explicit `Const(0.0)`
-    /// wired through a [`BlockKind::Sig2Voltage`], the same as every other gate. The named block
-    /// (`ctrl=`) must itself be a [`BlockKind::Sig2Voltage`] — an ideal switch's gate is itself
-    /// a voltage ($V_{GS}$ against $v_{th}$), not a distinct discrete-actuation signal domain.
+    /// wired through a `domain=voltage` [`BlockKind::Sig2Phys`], the same as every other gate.
+    /// The named block (`ctrl=`) must itself be a `domain=voltage` [`BlockKind::Sig2Phys`] — an
+    /// ideal switch's gate is itself a voltage ($V_{GS}$ against $v_{th}$), not a distinct
+    /// discrete-actuation signal domain (and never `domain=current`, even though `Sig2Phys`
+    /// itself allows that domain for `I`-source targets).
     ///
     /// ## Parameters
     /// - `gate=block` — the only accepted value; every gate is block-driven.
-    /// - `ctrl=<name>` — the name of a declared [`BlockKind::Sig2Voltage`] block.
+    /// - `ctrl=<name>` — the name of a declared `domain=voltage` [`BlockKind::Sig2Phys`] block.
     ///
     /// ## Errors
     /// - `gate=` missing entirely on a `kind=ideal_switch` line — rejected at parse time:
@@ -2275,18 +2309,18 @@ pub enum GateBinding {
     ///   file's own module doc comment)`.
     /// - `gate=` present but not `block` — rejected at parse time: `unknown gate spec '<value>'
     ///   (only gate=block ctrl=<name> exists -- every gate is block-driven)`.
-    /// - `ctrl=` naming a block that isn't a [`BlockKind::Sig2Voltage`] — rejected at
-    ///   `dae-runtime`'s validation stage (not netlist parse time):
-    ///   `DaeError::GateTargetNotSig2Voltage`.
+    /// - `ctrl=` naming a block that isn't a `domain=voltage` [`BlockKind::Sig2Phys`] (including
+    ///   a `domain=current` one) — rejected at `dae-runtime`'s validation stage (not netlist
+    ///   parse time): `DaeError::GateTargetNotSig2Voltage`.
     ///
     /// ## Netlist form
     /// ```text
     /// NAME kind=ideal_switch r_on=<f64> g_breakdown=<f64> v_breakdown=<f64> g_off=<f64> \
-    ///      v_th=<f64> g_on=<f64> gate=block ctrl=<sig2voltage_block_name>
+    ///      v_th=<f64> g_on=<f64> gate=block ctrl=<sig2phys_voltage_block_name>
     /// ```
     ///
     /// ## Example
-    /// An ideal switch permanently held on via a `Const(1)` wired through `Sig2Voltage` — the
+    /// An ideal switch permanently held on via a `Const(1)` wired through `Sig2Phys` — the
     /// plain `D1 in out idealswitchmodel` line gives the electrical connectivity (drain, source;
     /// the model name is unused for a `kind=ideal_switch`-overridden device), the same-named
     /// `kind=ideal_switch` line supplies the physics and gate. Verified end to end: `V(out)`
@@ -2294,7 +2328,7 @@ pub enum GateBinding {
     /// with a 1 kΩ load):
     /// ```text
     /// ONVAL kind=const value=1
-    /// ONGATE kind=sig2voltage in=ONVAL
+    /// ONGATE kind=sig2phys domain=voltage in=ONVAL
     /// V1 in 0 5
     /// D1 in out idealswitchmodel
     /// D1 kind=ideal_switch r_on=0.1 g_breakdown=0 v_breakdown=-100 g_off=0 v_th=0.5 g_on=5 \
@@ -2316,16 +2350,17 @@ impl GateBinding {
 
     /// # Panics
     /// If the named block's own current value is a `SignalValue::Vector` — unreachable in
-    /// practice, since the *only* legal `GateBinding` target is a `BlockKind::Sig2Voltage`
-    /// converter (enforced before any step runs), and `Sig2Voltage` itself rejects a `Vector`
-    /// input at evaluation time — there is no way for a validly-targeted gate to ever see one
-    /// here. Also panics if `name` isn't in `outputs` at all, exactly as before this variant
-    /// existed (equally unreachable, for the same "checked before any step runs" reason).
+    /// practice, since the *only* legal `GateBinding` target is a `domain=voltage`
+    /// `BlockKind::Sig2Phys` converter (enforced before any step runs), and `Sig2Phys` itself
+    /// rejects a `Vector` input at evaluation time — there is no way for a validly-targeted gate
+    /// to ever see one here. Also panics if `name` isn't in `outputs` at all, exactly as before
+    /// this variant existed (equally unreachable, for the same "checked before any step runs"
+    /// reason).
     pub fn resolve(&self, outputs: &BTreeMap<String, SignalValue>) -> SwitchState {
         let GateBinding::Block(name) = self;
         let value = outputs[name.as_str()].as_scalar().unwrap_or_else(|| {
             panic!(
-                "gate '{name}' resolved to a vector signal -- unreachable, since Sig2Voltage \
+                "gate '{name}' resolved to a vector signal -- unreachable, since Sig2Phys \
                  itself must already reject a vector input"
             )
         });
@@ -2383,8 +2418,12 @@ pub fn block_kind_name(kind: &BlockKind) -> &'static str {
         BlockKind::OctBlock { .. } => "octblock",
         BlockKind::CoordinateTransform { kind, .. } => kind.name(),
         BlockKind::Pmsm { .. } => "pmsm",
-        BlockKind::Probe(_) => "probe",
-        BlockKind::Sig2Voltage => "sig2voltage",
-        BlockKind::Sig2Current => "sig2current",
+        BlockKind::Phys2Sig(_) => "phys2sig",
+        BlockKind::Sig2Phys {
+            domain: PhysicalDomain::Voltage,
+        } => "sig2phys(domain=voltage)",
+        BlockKind::Sig2Phys {
+            domain: PhysicalDomain::Current,
+        } => "sig2phys(domain=current)",
     }
 }

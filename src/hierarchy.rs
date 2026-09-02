@@ -21,7 +21,7 @@
 //!   whatever `EXT_DUTY` (a block declared outside the subckt, at whatever scope `X1` itself is
 //!   called from) produces.
 //! - **Signal out**: an internal block whose own `.name` *is* the declared port name (e.g. a
-//!   `kind=probe` block literally named `reading` inside `.subckt sensor vin vout reading`)
+//!   `kind=phys2sig` block literally named `reading` inside `.subckt sensor vin vout reading`)
 //!   becomes addressable from outside under whatever name the caller bound that port to (`X1 a b
 //!   MEASURED sensor` exposes it as `MEASURED`) — symmetric with how an internal node named the
 //!   same as an electrical port is externally addressable through the caller's own binding.
@@ -37,7 +37,7 @@ use general_spice_core::ast::{BlockInstance, ElementInstance, Statement, Subckt}
 /// Recursively expands every `.subckt`/`X`-instance pair in `statements` into one flat list,
 /// with every internal device/block name dotted-path-prefixed by its instantiation chain (e.g.
 /// `X1.R1`, `X1.X2.C3`) so multiple instances of the same subcircuit never collide and the
-/// hierarchy stays visible in every name downstream (gate bindings, probes, CSV columns).
+/// hierarchy stays visible in every name downstream (gate bindings, phys2sig blocks, CSV columns).
 /// `.subckt`/`.ends` statements themselves are consumed, not passed through — the returned list
 /// contains only the expanded, top-level-equivalent statements a flat builder already knows how
 /// to handle.
@@ -233,10 +233,10 @@ fn mangle_block(
     resolve: &impl Fn(&str) -> String,
 ) -> BlockInstance {
     const SIGNAL_FIELDS: [&str; 5] = ["in", "inputs", "ctrl", "clamp_lo_in", "clamp_hi_in"];
-    // `kind=probe`'s own reference fields (`node=<electrical node>`, `branch=<element name>` --
-    // see `system_builder::build_kind`'s `"probe"` arm) name an *electrical* thing, not a
+    // `kind=phys2sig`'s own reference fields (`node=<electrical node>`, `branch=<element name>` --
+    // see `system_builder::build_kind`'s `"phys2sig"` arm) name an *electrical* thing, not a
     // signal, but still need the exact same dotted-path/port/ground resolution as an
-    // ElementInstance's own nodes -- a probe declared inside a .subckt body pointing at a
+    // ElementInstance's own nodes -- a phys2sig declared inside a .subckt body pointing at a
     // purely-internal node (not one of the declared ports) would otherwise keep its unmangled
     // name after flattening and silently fail to resolve (or, worse, accidentally match an
     // unrelated same-named node elsewhere in the flattened circuit). Each is a single value,
@@ -530,7 +530,7 @@ mod tests {
             Statement::BlockInstance(BlockInstance {
                 name: "reading".to_string(),
                 fields: vec![
-                    ("kind".to_string(), "probe".to_string()),
+                    ("kind".to_string(), "phys2sig".to_string()),
                     ("node".to_string(), "vout".to_string()),
                 ],
                 span: 1..2,
@@ -551,7 +551,10 @@ mod tests {
             .iter()
             .find_map(|s| match s {
                 Statement::BlockInstance(bi)
-                    if bi.fields.iter().any(|(k, v)| k == "kind" && v == "probe") =>
+                    if bi
+                        .fields
+                        .iter()
+                        .any(|(k, v)| k == "kind" && v == "phys2sig") =>
                 {
                     Some(bi)
                 }
@@ -559,7 +562,7 @@ mod tests {
             })
             .unwrap();
         assert_eq!(sensor_block.name, "MEASURED");
-        // The probe's own `node=vout` field must resolve through the same port binding as an
+        // The phys2sig's own `node=vout` field must resolve through the same port binding as an
         // electrical node ("vout" is a declared port, bound to "b" at the call site) -- not be
         // left as the literal, unmangled "vout".
         let node_field = sensor_block
@@ -580,11 +583,11 @@ mod tests {
     }
 
     #[test]
-    fn a_probe_inside_a_subckt_body_resolves_its_node_field_to_the_dotted_path_name() {
-        // Regression: a probe's `node=`/`branch=` fields reference an *electrical* thing, not a
+    fn a_phys2sig_inside_a_subckt_body_resolves_its_node_field_to_the_dotted_path_name() {
+        // Regression: a phys2sig's `node=`/`branch=` fields reference an *electrical* thing, not a
         // signal -- they must get the same dotted-path mangling as an ElementInstance's own
-        // nodes when the node is purely internal (not a declared port), or the probe silently
-        // keeps referencing the unmangled, undeclared name after flattening.
+        // nodes when the node is purely internal (not a declared port), or the phys2sig
+        // silently keeps referencing the unmangled, undeclared name after flattening.
         use general_spice_core::ast::BlockInstance;
 
         let statements = vec![
@@ -594,7 +597,7 @@ mod tests {
             Statement::BlockInstance(BlockInstance {
                 name: "VMID".to_string(),
                 fields: vec![
-                    ("kind".to_string(), "probe".to_string()),
+                    ("kind".to_string(), "phys2sig".to_string()),
                     ("node".to_string(), "mid".to_string()),
                 ],
                 span: 1..2,
@@ -602,7 +605,7 @@ mod tests {
             Statement::BlockInstance(BlockInstance {
                 name: "IR1".to_string(),
                 fields: vec![
-                    ("kind".to_string(), "probe".to_string()),
+                    ("kind".to_string(), "phys2sig".to_string()),
                     ("branch".to_string(), "R1".to_string()),
                 ],
                 span: 1..2,
