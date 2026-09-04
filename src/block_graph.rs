@@ -2194,7 +2194,14 @@ pub enum BlockKind {
     ///   '<name>' field 'domain' must be 'voltage' or 'current' (got '<value>')`.
     /// - Beyond that, none specific to this `kind=` — every real enforcement (a `V`/`I`/gate
     ///   target actually naming a `Sig2Phys` of the right domain) happens at `dae-runtime`'s
-    ///   validation stage, not netlist parse time.
+    ///   validation stage, not netlist parse time. `general-mna` itself only ever sees the
+    ///   device-source half of a document (with `--devices <file>`, it doesn't see the netlist
+    ///   at all), so it cannot detect a converter's name reused as an ordinary circuit *node* —
+    ///   that mistake produces no parse error here. `dae-runtime` rejects it as
+    ///   `DaeError::Sig2PhysUsedAsCircuitNode`: this block has no terminals and stamps nothing
+    ///   into the MNA system, so a net sharing its name is merely undriven, and KCL solves it to
+    ///   a silently wrong `0` rather than failing — a converter must always be *referenced by
+    ///   name* (a source's value field, or a switch's `gate=`/`ctrl=`), never wired.
     ///
     /// ## Netlist form
     /// ```text
