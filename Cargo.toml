@@ -28,5 +28,5 @@ pyo3 = { version = "0.27", features = ["extension-module"], optional = true }
 # published, and is required for `cargo publish` of general-mna itself to succeed at all
 # (crates.io ignores `path`, needs `version`).
 general-spice-core = { path = "../spice-lsp/servers/core", version = "0.1.0" }
-continuous-blocks = { path = "../general-simulator/crates/continuous-blocks", version = "0.1.0" }
-pwl-devices = { path = "../general-simulator/crates/pwl-devices", version = "0.1.0" }
+continuous-blocks = { path = "../general-simulator/crates/continuous-blocks", version = "0.2.0" }
+pwl-devices = { path = "../general-simulator/crates/pwl-devices", version = "0.2.0" }
