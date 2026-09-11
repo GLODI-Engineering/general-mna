@@ -363,7 +363,173 @@ fn existing_source_syntax_still_parses() {
 }
 
 // ---------------------------------------------------------------------------------------------
-// ic= initial conditions (general-mna#3)
+// Positional device-card parameters (general-mna#4)
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn a_stray_word_after_a_source_value_is_rejected() {
+    let error = build_error("V1 1 0 10 wibble\nR1 1 0 1k\n");
+    assert_eq!(
+        error.to_string(),
+        "line 1: device 'V1' unexpected extra parameter 'wibble' (device V takes a DC value, an \
+         'ac' specification, and/or one of SIN/PULSE/EXP/PWL/SFFM)"
+    );
+}
+
+#[test]
+fn a_second_bare_source_value_is_rejected() {
+    let error = build_error("I1 1 0 10 20\nR1 1 0 1k\n");
+    assert_eq!(
+        error.to_string(),
+        "line 1: device 'I1' unexpected extra parameter '20' (device I takes a DC value, an 'ac' \
+         specification, and/or one of SIN/PULSE/EXP/PWL/SFFM)"
+    );
+}
+
+#[test]
+fn a_misspelled_source_function_is_rejected_rather_than_read_as_a_value() {
+    let error = build_error("V1 1 0 SNI(0 10 1000)\nR1 1 0 1k\n");
+    assert_eq!(
+        error.to_string(),
+        "line 1: device 'V1' unknown source function 'SNI' (device V accepts \
+         SIN/PULSE/EXP/PWL/SFFM)"
+    );
+}
+
+#[test]
+fn a_source_function_with_the_wrong_argument_count_is_rejected() {
+    // PWL needs (time, value) pairs; an odd argument list is a dropped or duplicated number.
+    let error = build_error("V1 1 0 PWL(0 0 1m)\nR1 1 0 1k\n");
+    assert_eq!(
+        error.to_string(),
+        "line 1: device 'V1' 'PWL(0 0 1m)' is not a valid PWL parameter list"
+    );
+}
+
+#[test]
+fn a_dc_keyword_with_nothing_after_it_is_rejected() {
+    let error = build_error("V1 1 0 DC\nR1 1 0 1k\n");
+    assert_eq!(
+        error.to_string(),
+        "line 1: device 'V1' 'dc' is not followed by a value"
+    );
+}
+
+#[test]
+fn an_unterminated_source_function_is_rejected() {
+    let error = build_error("V1 1 0 SIN(0 10 1000\nR1 1 0 1k\n");
+    assert_eq!(
+        error.to_string(),
+        "line 1: device 'V1' 'SIN(' is never closed by a ')'"
+    );
+}
+
+#[test]
+fn every_legitimate_source_clause_form_still_parses() {
+    for source in [
+        "V1 1 0 10\nR1 1 0 1k",
+        "V1 1 0 DC 10\nR1 1 0 1k",
+        "V1 1 0 DC 10 AC 1\nR1 1 0 1k",
+        "V1 1 0 AC 1 0\nR1 1 0 1k",
+        "V1 1 0 SIN(0 10 1000 0 0 0)\nR1 1 0 1k",
+        "V1 1 0 PULSE(0 5 1m 100n 100n 2m 4m)\nR1 1 0 1k",
+        "V1 1 0 DC 0 SIN(0 10 1000)\nR1 1 0 1k",
+        "I1 1 0 PWL(0 0 1m 5)\nR1 1 0 1k",
+    ] {
+        MnaBuilder::new(Dialect::Ngspice)
+            .build_fragment(source)
+            .unwrap_or_else(|e| panic!("{source:?} should parse, got {e}"));
+    }
+}
+
+#[test]
+fn a_transient_function_after_a_dc_clause_is_no_longer_dropped() {
+    // `TransientFunction::parse` only ever looked at the first parameter token, so this card
+    // silently simulated a flat 0 V source. The SIN is the source's value now, as a symbol the
+    // caller resolves per step -- the same treatment a leading SIN( already got.
+    let system = MnaBuilder::new(Dialect::Ngspice)
+        .build_fragment("V1 1 0 DC 0 SIN(0 10 1000)\nR1 1 0 1k")
+        .unwrap();
+    assert_eq!(system.transient_sources.len(), 1);
+    assert_eq!(system.input_values[0].to_string(), "V1");
+}
+
+#[test]
+fn an_ac_only_source_has_the_spice_default_dc_value_of_zero() {
+    // It used to be read as `params.first()`, i.e. a source whose value was a symbol named AC.
+    let system = MnaBuilder::new(Dialect::Ngspice)
+        .build_fragment("V1 1 0 AC 1\nR1 1 0 1k")
+        .unwrap();
+    assert_eq!(system.input_values[0].to_string(), "0");
+}
+
+#[test]
+fn an_extra_value_on_a_controlled_source_is_rejected() {
+    let error = build_error("Vsense 1 0 1\nR1 2 0 1k\nF1 2 0 Vsense 2 3\n");
+    assert_eq!(
+        error.to_string(),
+        "line 3: device 'F1' unexpected extra parameter '3' (device F takes exactly two values, \
+         a controlling source name and a gain)"
+    );
+}
+
+#[test]
+fn an_extra_value_on_a_four_node_vcvs_is_rejected() {
+    let error = build_error("V1 1 0 1\nR1 2 0 1k\nE1 2 0 1 0 3 4\n");
+    assert_eq!(
+        error.to_string(),
+        "line 3: device 'E1' unexpected extra parameter '4' (device E takes exactly one value)"
+    );
+}
+
+#[test]
+fn an_extra_value_on_a_mutual_inductance_is_rejected() {
+    // K's coupling coefficient is its only parameter; general-spice-core hands every earlier
+    // token over as an inductor name, so the surviving extra token is unambiguously wrong.
+    let error = build_error("L1 1 0 4\nL2 2 0 9\nK1 L1 L2 0.5 0.6\n");
+    assert!(
+        error.to_string().contains("unknown coupled inductor '0.5'"),
+        "{error}"
+    );
+}
+
+#[test]
+fn a_behavioral_vcvs_still_reports_the_form_it_is_missing() {
+    // The two-node `VALUE={...}` form is not stamped by this crate at all. Field-checking it
+    // first would have replaced that message with a misleading `unknown field 'value'`.
+    let error = build_error("V1 1 0 1\nR1 2 0 1k\nE1 2 0 VALUE={V(1)*2}\n");
+    assert_eq!(
+        error.to_string(),
+        "cannot stamp element 'E1': requires the classic four-node linear form"
+    );
+}
+
+#[test]
+fn a_diode_keeps_its_model_name_area_and_off_hint() {
+    for source in [
+        "V1 1 0 1\nD1 1 0\nR1 1 0 1k",
+        "V1 1 0 1\nD1 1 0 DMOD\nR1 1 0 1k",
+        "V1 1 0 1\nD1 1 0 DMOD 2\nR1 1 0 1k",
+        "V1 1 0 1\nD1 1 0 DMOD 2 OFF\nR1 1 0 1k",
+    ] {
+        MnaBuilder::new(Dialect::Ngspice)
+            .build_fragment(source)
+            .unwrap_or_else(|e| panic!("{source:?} should parse, got {e}"));
+    }
+}
+
+#[test]
+fn a_fourth_positional_on_a_diode_is_rejected() {
+    let error = build_error("V1 1 0 1\nD1 1 0 DMOD 2 wibble\nR1 1 0 1k\n");
+    assert_eq!(
+        error.to_string(),
+        "line 2: device 'D1' unexpected extra parameter 'wibble' (device D takes a model name, \
+         an optional area factor and an optional 'off')"
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// ic= initial conditions (general-mna#3, general-mna#5)
 // ---------------------------------------------------------------------------------------------
 
 #[test]
@@ -384,15 +550,10 @@ fn no_ic_means_no_initial_state_at_all() {
     );
 }
 
-#[test]
-fn capacitor_ic_holds_its_voltage_and_the_rest_of_the_circuit_follows() {
-    // Hand-derived: C1 is a 5 V source to ground at t = 0, so V(b) = 5 and V(a) = 10 (V1 is
-    // ideal). R1 then carries (10 - 5)/1000 = 5 mA from a to b, which V1 must supply, and a
-    // voltage source's branch unknown is the current leaving its first node, so I(V1) = -5 mA.
+fn ic_state(source: &str) -> (general_mna::MnaSystem, Vec<f64>) {
     let system = MnaBuilder::new(Dialect::Ngspice)
-        .build_fragment("V1 a 0 10\nR1 a b 1000\nC1 b 0 1e-6 ic=5")
+        .build_fragment(source)
         .unwrap();
-    assert_eq!(system.initial_conditions.len(), 1);
     let x = system
         .initial_state(
             &BTreeMap::new(),
@@ -401,102 +562,127 @@ fn capacitor_ic_holds_its_voltage_and_the_rest_of_the_circuit_follows() {
         .unwrap()
         .unwrap();
     assert_eq!(x.len(), system.order());
+    (system, x)
+}
+
+fn ic_error(source: &str) -> general_mna::InitialStateError {
+    MnaBuilder::new(Dialect::Ngspice)
+        .build_fragment(source)
+        .unwrap()
+        .initial_state(
+            &BTreeMap::new(),
+            general_mna::DEFAULT_INITIAL_STATE_TOLERANCE,
+        )
+        .unwrap_err()
+}
+
+#[test]
+fn an_ic_does_not_change_the_system_that_gets_solved() {
+    // The whole point of an assignment: `ic=` is a statement about `x` at one instant, so the
+    // circuit's own equations -- and the unknown ordering built from them -- are byte-identical
+    // with and without it.
+    let with = MnaBuilder::new(Dialect::Ngspice)
+        .build_fragment("V1 a 0 10\nR1 a b 1000\nC1 b 0 1e-6 ic=5\nL1 b 0 1e-3 ic=2")
+        .unwrap();
+    let without = MnaBuilder::new(Dialect::Ngspice)
+        .build_fragment("V1 a 0 10\nR1 a b 1000\nC1 b 0 1e-6\nL1 b 0 1e-3")
+        .unwrap();
+    assert_eq!(with.unknowns, without.unknowns);
+    assert_eq!(with.a, without.a);
+    assert_eq!(with.k, without.k);
+    assert_eq!(with.b, without.b);
+    assert_eq!(with.u, without.u);
+    assert_eq!(with.initial_conditions.len(), 2);
+    assert!(without.initial_conditions.is_empty());
+}
+
+#[test]
+fn capacitor_ic_assigns_its_own_voltage_and_leaves_everything_else_at_rest() {
+    // Assignment, not a solve: V(b) is the declared 5 V and nothing else moves to accommodate
+    // it. A constrained operating-point solve would answer V(a) = 10, I(V1) = -5 mA here,
+    // redistributing the circuit around a value the netlist only ever said about the capacitor.
+    let (system, x) = ic_state("V1 a 0 10\nR1 a b 1000\nC1 b 0 1e-6 ic=5");
+    assert_eq!(system.initial_conditions.len(), 1);
     assert!((x[index(&system, "V(b)")] - 5.0).abs() < 1e-12);
-    assert!((x[index(&system, "V(a)")] - 10.0).abs() < 1e-12);
-    assert!((x[index(&system, "I(V1)")] + 5e-3).abs() < 1e-12);
+    assert_eq!(x[index(&system, "V(a)")], 0.0);
+    assert_eq!(x[index(&system, "I(V1)")], 0.0);
 }
 
 #[test]
 fn capacitor_ic_is_first_node_minus_second_node() {
     // Same capacitor, written the other way round: ic is V(first) - V(second), so V(b) = -5.
-    let system = MnaBuilder::new(Dialect::Ngspice)
-        .build_fragment("V1 a 0 10\nR1 a b 1000\nC1 0 b 1e-6 ic=5")
-        .unwrap();
-    let x = system
-        .initial_state(
-            &BTreeMap::new(),
-            general_mna::DEFAULT_INITIAL_STATE_TOLERANCE,
-        )
-        .unwrap()
-        .unwrap();
+    let (system, x) = ic_state("V1 a 0 10\nR1 a b 1000\nC1 0 b 1e-6 ic=5");
     assert!((x[index(&system, "V(b)")] + 5.0).abs() < 1e-12);
 }
 
 #[test]
-fn capacitor_ic_works_between_two_floating_nodes() {
-    // The case a bare assignment cannot express: neither terminal is ground, so only the
-    // *difference* is declared and the constrained operating point has to settle the rest.
-    // R1 (a->b) and R2 (c->0) are 1 k each and carry the same current i; V(b) - V(c) = 5 is
-    // held by C1, so 10 - 1000i - 5 - 1000i = 0 => i = 2.5 mA, V(b) = 7.5, V(c) = 2.5.
-    let system = MnaBuilder::new(Dialect::Ngspice)
-        .build_fragment("V1 a 0 10\nR1 a b 1000\nC1 b c 1e-6 ic=5\nR2 c 0 1000")
-        .unwrap();
-    let x = system
-        .initial_state(
-            &BTreeMap::new(),
-            general_mna::DEFAULT_INITIAL_STATE_TOLERANCE,
-        )
-        .unwrap()
-        .unwrap();
-    assert!((x[index(&system, "V(b)")] - 7.5).abs() < 1e-12);
-    assert!((x[index(&system, "V(c)")] - 2.5).abs() < 1e-12);
+fn capacitor_ic_between_two_floating_nodes_assigns_only_the_difference() {
+    // Neither terminal is ground, so the netlist declares a difference and nothing else. The
+    // island is referenced at its lowest-indexed node (V(b), introduced by R1 before C1
+    // introduces V(c)), exactly as `initial_state` documents, and the declared 5 V is exact.
+    let (system, x) = ic_state("V1 a 0 10\nR1 a b 1000\nC1 b c 1e-6 ic=5\nR2 c 0 1000");
+    let vb = x[index(&system, "V(b)")];
+    let vc = x[index(&system, "V(c)")];
+    assert!((vb - vc - 5.0).abs() < 1e-12);
+    assert_eq!(vb, 0.0);
 }
 
 #[test]
-fn inductor_ic_is_the_current_from_the_first_node_to_the_second() {
-    // The sign convention people get wrong, pinned down. `L1 a b ... ic=12` puts 12 A into a
-    // and out of b, which is exactly the sign of the system's own I(L1) unknown. The 12 A
-    // must come from V1, so I(V1) = -12; and R1 (b->0) carries it, so V(b) = 12 * 10 = 120.
-    let system = MnaBuilder::new(Dialect::Ngspice)
-        .build_fragment("V1 a 0 10\nL1 a b 5e-6 ic=12\nR1 b 0 10")
-        .unwrap();
-    let x = system
-        .initial_state(
-            &BTreeMap::new(),
-            general_mna::DEFAULT_INITIAL_STATE_TOLERANCE,
-        )
-        .unwrap()
-        .unwrap();
+fn series_ic_capacitors_chain_to_the_right_potentials_in_either_card_order() {
+    // 3 V across C1 (a -> b) and 2 V across C2 (b -> ground) means V(b) = 2 and V(a) = 5. A
+    // per-card assignment done in netlist order would leave V(a) stale at 3; propagating over
+    // the graph the conditions form does not, in either order.
+    for source in [
+        "C1 a b 3e-6 ic=3\nC2 b 0 2e-6 ic=2",
+        "C2 b 0 2e-6 ic=2\nC1 a b 3e-6 ic=3",
+    ] {
+        let (system, x) = ic_state(source);
+        assert!(
+            (x[index(&system, "V(b)")] - 2.0).abs() < 1e-12,
+            "{source:?} gave V(b) = {}",
+            x[index(&system, "V(b)")]
+        );
+        assert!(
+            (x[index(&system, "V(a)")] - 5.0).abs() < 1e-12,
+            "{source:?} gave V(a) = {}",
+            x[index(&system, "V(a)")]
+        );
+    }
+}
+
+#[test]
+fn inductor_ic_assigns_its_branch_current_and_nothing_else() {
+    // `L1 a b ... ic=12` is 12 A from a to b through the inductor, which is exactly the sign of
+    // the system's own I(L1) unknown. The 12 A do not appear anywhere else in the vector: a
+    // solve would have made V1 supply them (I(V1) = -12) and R1 carry them (V(b) = 120).
+    let (system, x) = ic_state("V1 a 0 10\nL1 a b 5e-6 ic=12\nR1 b 0 10");
     assert!((x[index(&system, "I(L1)")] - 12.0).abs() < 1e-12);
-    assert!((x[index(&system, "I(V1)")] + 12.0).abs() < 1e-12);
-    assert!((x[index(&system, "V(b)")] - 120.0).abs() < 1e-12);
-    assert!((x[index(&system, "V(a)")] - 10.0).abs() < 1e-12);
+    assert_eq!(x[index(&system, "I(V1)")], 0.0);
+    assert_eq!(x[index(&system, "V(b)")], 0.0);
+    assert_eq!(x[index(&system, "V(a)")], 0.0);
 }
 
 #[test]
-fn reversing_an_inductor_reverses_the_declared_current() {
-    let system = MnaBuilder::new(Dialect::Ngspice)
-        .build_fragment("V1 a 0 10\nL1 b a 5e-6 ic=12\nR1 b 0 10")
-        .unwrap();
-    let x = system
-        .initial_state(
-            &BTreeMap::new(),
-            general_mna::DEFAULT_INITIAL_STATE_TOLERANCE,
-        )
-        .unwrap()
-        .unwrap();
-    // I(L1) is still +12 (it is the b -> a current now), so the physical current through R1
-    // reverses: 12 A now flow out of node b into the inductor, so V(b) = -120.
+fn reversing_an_inductor_keeps_ic_on_its_own_branch_unknown() {
+    // I(L1) is +12 either way, because `ic` and `I(<name>)` share one orientation -- the card's
+    // own first-node-to-second-node direction. Writing `L1 b a` therefore declares the opposite
+    // *physical* current while the number in the state vector is unchanged, which is precisely
+    // why the convention is written down rather than inferred.
+    let (system, x) = ic_state("V1 a 0 10\nL1 b a 5e-6 ic=12\nR1 b 0 10");
     assert!((x[index(&system, "I(L1)")] - 12.0).abs() < 1e-12);
-    assert!((x[index(&system, "V(b)")] + 120.0).abs() < 1e-12);
 }
 
 #[test]
-fn ic_free_storage_is_open_or_short_at_the_ic_operating_point() {
-    // C2 has no ic, so it is an open circuit at t = 0 and draws nothing: V(c) = V(b) = 5,
-    // unchanged from the single-capacitor case above.
-    let system = MnaBuilder::new(Dialect::Ngspice)
-        .build_fragment("V1 a 0 10\nR1 a b 1000\nC1 b 0 1e-6 ic=5\nC2 b c 1e-6\n R2 c 0 1000")
-        .unwrap();
-    let x = system
-        .initial_state(
-            &BTreeMap::new(),
-            general_mna::DEFAULT_INITIAL_STATE_TOLERANCE,
-        )
-        .unwrap()
-        .unwrap();
-    assert!((x[index(&system, "V(b)")] - 5.0).abs() < 1e-12);
-    assert!(x[index(&system, "V(c)")].abs() < 1e-12);
+fn an_ic_free_capacitor_is_not_precharged_by_the_rest_of_the_circuit() {
+    // The clearest observable difference between assignment and solve. C1 declares no ic, so it
+    // starts at rest: V(b) = 0. The constrained operating point would have opened it and let
+    // the R1/R2 divider charge it to 5 V before the run even began, for a capacitor nothing had
+    // charged.
+    let (system, x) = ic_state(
+        "V1 a 0 10\nR1 a b 1000\nR2 b 0 1000\nC1 b 0 1e-6\nL1 a c 1e-3 ic=0.02\nR3 c 0 100",
+    );
+    assert_eq!(x[index(&system, "V(b)")], 0.0);
+    assert!((x[index(&system, "I(L1)")] - 0.02).abs() < 1e-12);
 }
 
 #[test]
@@ -515,22 +701,68 @@ fn an_ic_can_be_a_symbol_resolved_at_evaluation_time() {
 }
 
 #[test]
-fn contradictory_ic_has_no_unique_operating_point() {
-    // C1 sits directly across an ideal voltage source, which already fixes its voltage, so the
-    // constrained system is inconsistent rather than merely over-determined.
-    let system = MnaBuilder::new(Dialect::Ngspice)
-        .build_fragment("V1 a 0 10\nR1 a 0 1000\nC1 a 0 1e-6 ic=5")
-        .unwrap();
-    let error = system
-        .initial_state(
-            &BTreeMap::new(),
-            general_mna::DEFAULT_INITIAL_STATE_TOLERANCE,
-        )
-        .unwrap_err();
+fn an_ic_across_an_ideal_voltage_source_is_reported_not_silently_overridden() {
+    // V1's own branch equation already fixes V(a) at 10, and the assignment sets it to 5. Every
+    // unknown in that equation is assigned, so nothing is left free to absorb the 5 V
+    // difference -- that is a contradiction, not a transient the first step will resolve.
+    let error = ic_error("V1 a 0 10\nR1 a 0 1000\nC1 a 0 1e-6 ic=5");
+    match &error {
+        general_mna::InitialStateError::InconsistentWithCircuit {
+            constraint,
+            residual,
+        } => {
+            assert_eq!(constraint, "I(V1)");
+            assert!((residual + 5.0).abs() < 1e-12, "{error}");
+        }
+        other => panic!("expected InconsistentWithCircuit, got {other:?}"),
+    }
+}
+
+#[test]
+fn series_inductors_declaring_different_currents_are_reported() {
+    // KCL at the shared node already says the two currents are equal; 1 A and 2 A are not.
+    let error = ic_error("V1 a 0 10\nL1 a b 1e-3 ic=1\nL2 b 0 1e-3 ic=2");
+    match &error {
+        general_mna::InitialStateError::InconsistentWithCircuit {
+            constraint,
+            residual,
+        } => {
+            assert_eq!(constraint, "V(b)");
+            assert!((residual.abs() - 1.0).abs() < 1e-12, "{error}");
+        }
+        other => panic!("expected InconsistentWithCircuit, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_loop_of_ic_capacitors_that_does_not_sum_to_zero_is_reported() {
+    // 1 V + 1 V around the loop cannot also be 5 V across it. This contradiction is between the
+    // conditions themselves, with no circuit equation involved, so it is reported separately.
+    let error = ic_error("C1 a b 1e-6 ic=1\nC2 b c 1e-6 ic=1\nC3 a c 1e-6 ic=5");
     assert!(
-        error
-            .to_string()
-            .starts_with("no unique ic= operating point"),
+        matches!(
+            error,
+            general_mna::InitialStateError::ConflictingConditions { .. }
+        ),
         "{error}"
+    );
+    assert!(error.to_string().starts_with("contradictory ic= values"));
+}
+
+#[test]
+fn an_ic_free_deck_never_reaches_the_consistency_check() {
+    // A capacitor directly across a voltage source is a perfectly ordinary netlist as long as
+    // it declares no ic -- the check exists to police assignments, not topologies.
+    let system = MnaBuilder::new(Dialect::Ngspice)
+        .build_fragment("V1 a 0 10\nR1 a 0 1000\nC1 a 0 1e-6")
+        .unwrap();
+    assert_eq!(
+        system
+            .initial_state(
+                &BTreeMap::new(),
+                general_mna::DEFAULT_INITIAL_STATE_TOLERANCE
+            )
+            .unwrap(),
+        None
     );
 }

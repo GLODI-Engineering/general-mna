@@ -95,9 +95,10 @@ impl MnaSystem {
     }
 }
 
-/// Default pivot tolerance for [`MnaSystem::initial_state`]'s constrained operating-point
-/// solve. Matches the magnitude the state-space reduction in this module is normally called
-/// with; pass an explicit value for a circuit whose element values span a very different range.
+/// Default residual tolerance for [`MnaSystem::initial_state`]'s consistency check, relative to
+/// the magnitude of the constraint row being checked. Matches the magnitude the state-space
+/// reduction in this module is normally called with; pass an explicit value for a circuit whose
+/// element values span a very different range.
 pub const DEFAULT_INITIAL_STATE_TOLERANCE: f64 = 1e-12;
 
 /// Why a netlist's declared `ic=` values could not be turned into a starting state vector.
@@ -105,15 +106,33 @@ pub const DEFAULT_INITIAL_STATE_TOLERANCE: f64 = 1e-12;
 pub enum InitialStateError {
     /// A component value, or an `ic=` value itself, could not be evaluated numerically.
     Evaluation(EvaluationError),
-    /// The constrained operating point has no unique solution. Either the `ic=` values
-    /// contradict the circuit (a capacitor's `ic` forced across an ideal voltage source, two
-    /// `ic`-bearing inductors in series disagreeing), or a node is left floating with no DC
-    /// path to anything once every `ic`-free capacitor is opened and every `ic`-free inductor
-    /// shorted.
-    Singular {
-        /// The unknown whose equation had no usable pivot, or a synthetic
-        /// `ic(<element>)` name for one of the auxiliary constraint rows.
-        unknown: String,
+    /// Two or more `ic=` values on capacitors contradict each other, independently of the rest
+    /// of the circuit: they form a loop whose declared voltages do not sum to zero, so no
+    /// assignment of node voltages satisfies all of them at once.
+    ConflictingConditions {
+        /// The element whose condition closed the contradictory loop.
+        element: String,
+        /// The voltage the other conditions in the loop already imply across it, in the
+        /// orientation the loop was walked in — which may be the reverse of the card's own
+        /// node order, so compare it with `declared` rather than reading a polarity out of it.
+        implied: f64,
+        /// The voltage this element declares, in that same orientation.
+        declared: f64,
+    },
+    /// An assignment violates one of the circuit's own algebraic constraints — every unknown in
+    /// that constraint is fixed by an `ic=`, and the values they are fixed to do not satisfy it.
+    ///
+    /// The two textbook cases: an `ic` on a capacitor wired directly across an ideal voltage
+    /// source (the source's branch equation already fixes that voltage), and two series
+    /// inductors whose `ic` values declare different currents (the shared node's KCL row
+    /// already fixes them equal).
+    InconsistentWithCircuit {
+        /// The unknown whose equation is violated. A node voltage `V(n)` names that node's KCL
+        /// equation; a branch current `I(name)` names that device's own branch equation.
+        constraint: String,
+        /// The constraint's residual at the assigned state — how far from satisfied it is, in
+        /// the equation's own units.
+        residual: f64,
     },
 }
 
@@ -121,15 +140,28 @@ impl fmt::Display for InitialStateError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Evaluation(error) => {
-                write!(f, "cannot evaluate the ic= operating point: {error}")
+                write!(f, "cannot evaluate the ic= initial state: {error}")
             }
-            Self::Singular { unknown } => write!(
+            Self::ConflictingConditions {
+                element,
+                implied,
+                declared,
+            } => write!(
                 f,
-                "no unique ic= operating point: the constrained equations have no usable pivot at \
-                 {unknown} — check that the declared ic= values do not contradict the circuit (an \
-                 ic on a capacitor directly across an ideal voltage source, or on series \
-                 inductors that disagree) and that every node still has a DC path once every \
-                 ic-free capacitor is opened and every ic-free inductor shorted"
+                "contradictory ic= values: '{element}' declares {declared} V across itself, but \
+                 the other ic= conditions it forms a loop with already imply {implied} V in the \
+                 same orientation"
+            ),
+            Self::InconsistentWithCircuit {
+                constraint,
+                residual,
+            } => write!(
+                f,
+                "the declared ic= values do not satisfy the circuit's own equation for \
+                 {constraint} (residual {residual}); every unknown in that equation is fixed by \
+                 an ic=, so nothing is left free to absorb the difference — check for an ic on a \
+                 capacitor across an ideal voltage source, or series inductors declaring \
+                 different currents"
             ),
         }
     }
@@ -144,33 +176,52 @@ impl From<EvaluationError> for InitialStateError {
 }
 
 impl MnaSystem {
-    /// Turns this netlist's declared `ic=` values into a consistent starting state vector, in
-    /// `unknowns` order — what a transient run wants for its `x` at `t = 0`.
+    /// Turns this netlist's declared `ic=` values into the starting state vector of a transient
+    /// run, in `unknowns` order — the `x` at `t = 0`.
     ///
     /// Returns `Ok(None)` when the netlist declares no `ic=` at all, so a caller can keep its
     /// existing "start from rest" default untouched rather than having to special-case an
     /// all-zero vector.
     ///
-    /// # What it actually solves
+    /// # It is an assignment, not a solve
     ///
-    /// The textbook constrained operating point, not a bare assignment. Each declared value is
-    /// *held*, and the rest of the circuit is solved around it, because the other unknowns are
-    /// not free: node voltages must still satisfy KCL, and a source's branch current must still
-    /// be whatever the constrained state draws from it. Concretely, at `t = 0`:
+    /// This is what "use initial conditions" means: the operating point is *skipped*. The
+    /// declared states are written into `x`, every other unknown starts at rest, and the system
+    /// that actually gets solved — `A`, `K`, `B`, `u` — is not touched at all. No element is
+    /// swapped for a source, nothing is opened or shorted, and no auxiliary unknown is
+    /// introduced, so the `unknowns` ordering (a public contract of this crate) cannot move.
     ///
-    /// - every capacitor **with** an `ic` becomes an ideal voltage source of that value;
-    /// - every capacitor **without** one becomes an open circuit (its only matrix entries are
-    ///   in `K`, and `dot(x)` plays no part here);
-    /// - every inductor **with** an `ic` becomes an ideal current source of that value — its
-    ///   own branch equation `v = L*dot(i)` is replaced by `I(<name>) = ic`, while it keeps its
-    ///   incidence in the two node equations, so its current still flows through the circuit;
-    /// - every inductor **without** one becomes a short circuit, its branch equation reducing
-    ///   to `V(p) - V(n) = 0`.
+    /// Concretely, the assigned unknowns are:
     ///
-    /// The auxiliary branch-current unknown each `ic`-bearing capacitor needs is appended
-    /// *after* every existing unknown and dropped from the result, so `unknowns` ordering — a
-    /// public contract of this crate — does not move, and the returned vector indexes exactly
-    /// like any other `x`.
+    /// - for an `ic`-bearing inductor, its own branch-current unknown `I(<name>)`, set to `ic`;
+    /// - for an `ic`-bearing capacitor, the *difference* between its two node voltages, which
+    ///   is not one unknown but two. Those capacitors are treated as a graph over nodes, one
+    ///   edge per declared `ic`, and each connected component's potentials are propagated from
+    ///   a root at `0`: ground when the component touches ground, otherwise the component's
+    ///   lowest-indexed node. A series chain and a floating island therefore both come out
+    ///   right, and the result does not depend on the order the cards appear in.
+    ///
+    /// Everything else — the other node voltages, every source's branch current, every
+    /// `ic`-free capacitor's voltage — stays at `0`. That is the visible difference from a
+    /// constrained operating-point solve, which would let the rest of the circuit move to
+    /// accommodate the declared value and would hand back an `ic`-free capacitor pre-charged by
+    /// a circuit that has not run yet.
+    ///
+    /// The vector this returns therefore need not satisfy the circuit's algebraic constraints,
+    /// exactly like any hand-built `x_initial`. That is a consumer's problem to know about, not
+    /// a defect: a first backward-Euler step re-imposes them.
+    ///
+    /// # What is reported rather than silently overridden
+    ///
+    /// - `ic=` values that contradict *each other* — a loop of `ic`-bearing capacitors whose
+    ///   declared voltages do not sum to zero — are [`InitialStateError::ConflictingConditions`].
+    /// - An assignment that violates one of the circuit's own algebraic equations, in which
+    ///   every unknown is fixed by an `ic=`, is
+    ///   [`InitialStateError::InconsistentWithCircuit`]. That covers an `ic` on a capacitor
+    ///   directly across an ideal voltage source, and series `ic`-bearing inductors declaring
+    ///   different currents. Only equations with no `K` row are checked, and only those all of
+    ///   whose unknowns are assigned: any equation with a free unknown in it, or with storage
+    ///   in it, is one the circuit can still satisfy and is not this method's business.
     ///
     /// # Sign conventions
     ///
@@ -180,8 +231,8 @@ impl MnaSystem {
     /// and out of `b`; `L1 b a 5e-6 ic=12` is the opposite physical current.
     ///
     /// `values` supplies any symbol the netlist left open, exactly as
-    /// [`MnaSystem::evaluate`] takes it. `tolerance` is the pivot threshold; see
-    /// [`DEFAULT_INITIAL_STATE_TOLERANCE`].
+    /// [`MnaSystem::evaluate`] takes it. `tolerance` is the relative residual threshold of the
+    /// consistency check; see [`DEFAULT_INITIAL_STATE_TOLERANCE`].
     pub fn initial_state(
         &self,
         values: &BTreeMap<String, f64>,
@@ -191,9 +242,7 @@ impl MnaSystem {
             return Ok(None);
         }
 
-        let numeric = self.evaluate(values)?;
         let order = self.unknowns.len();
-
         let mut environment = BTreeMap::new();
         for (name, expression) in &self.parameter_defaults {
             if let Ok(value) = expression.evaluate(values) {
@@ -202,75 +251,161 @@ impl MnaSystem {
         }
         environment.extend(values.iter().map(|(name, value)| (name.clone(), *value)));
 
-        let capacitors: Vec<&InitialCondition> = self
-            .initial_conditions
-            .iter()
-            .filter(|ic| matches!(ic, InitialCondition::CapacitorVoltage { .. }))
-            .collect();
-        let size = order + capacitors.len();
+        let mut x = vec![0.0; order];
+        let mut assigned = vec![false; order];
 
-        let mut coefficients = Matrix::filled(size, size, 0.0);
-        let mut rhs = Matrix::filled(size, 1, 0.0);
-        for row in 0..order {
-            for col in 0..order {
-                coefficients[(row, col)] = numeric.a[(row, col)];
-            }
-            rhs[(row, 0)] = numeric.u[row];
-        }
-
-        // Inductors first: replacing a branch equation in place needs the untouched copy above.
-        for ic in &self.initial_conditions {
-            let InitialCondition::InductorCurrent { branch, value, .. } = ic else {
+        for condition in &self.initial_conditions {
+            let InitialCondition::InductorCurrent { branch, value, .. } = condition else {
                 continue;
             };
-            for col in 0..size {
-                coefficients[(*branch, col)] = 0.0;
-            }
-            coefficients[(*branch, *branch)] = 1.0;
-            rhs[(*branch, 0)] = value.evaluate(&environment)?;
+            x[*branch] = value.evaluate(&environment)?;
+            assigned[*branch] = true;
         }
 
-        for (offset, ic) in capacitors.iter().enumerate() {
-            let InitialCondition::CapacitorVoltage {
-                positive,
-                negative,
-                value,
-                ..
-            } = ic
-            else {
-                continue;
-            };
-            let constraint = order + offset;
-            // The capacitor's own branch current, leaving the first node and entering the
-            // second — the same orientation `stamp_branch_incidence` gives every other branch
-            // device, so the auxiliary unknown reads like an ordinary `I(<name>)`.
-            if let Some(row) = positive {
-                coefficients[(*row, constraint)] = 1.0;
-                coefficients[(constraint, *row)] = 1.0;
-            }
-            if let Some(row) = negative {
-                coefficients[(*row, constraint)] = -1.0;
-                coefficients[(constraint, *row)] = -1.0;
-            }
-            rhs[(constraint, 0)] = value.evaluate(&environment)?;
-        }
+        assign_capacitor_potentials(
+            &self.initial_conditions,
+            &environment,
+            tolerance,
+            &mut x,
+            &mut assigned,
+        )?;
 
-        let solution = solve(&coefficients, &rhs, tolerance).map_err(|pivot| {
-            let unknown = match self.unknowns.get(pivot) {
-                Some(name) => name.clone(),
-                None => format!(
-                    "ic({})",
-                    capacitors
-                        .get(pivot - order)
-                        .map(|ic| ic.element())
-                        .unwrap_or("?")
-                ),
-            };
-            InitialStateError::Singular { unknown }
-        })?;
+        let numeric = self.evaluate(values)?;
+        check_assignment_against_circuit(&numeric, &x, &assigned, tolerance)?;
 
-        Ok(Some((0..order).map(|row| solution[(row, 0)]).collect()))
+        Ok(Some(x))
     }
+}
+
+/// Propagates the node potentials implied by every `ic`-bearing capacitor.
+///
+/// Each condition is an edge `v(positive) - v(negative) = ic` over the node unknowns, with
+/// ground as an extra vertex pinned at `0`. Every connected component is walked breadth-first
+/// from a root held at `0` — ground when the component contains it, otherwise the component's
+/// lowest-indexed node, since a floating island's absolute potential is not something the
+/// netlist declared and any choice is as good as another. An edge that closes a loop with a
+/// mismatching sum is a contradiction between the conditions themselves and is reported.
+/// A vertex of the `ic`-bearing-capacitor graph: an index into `unknowns` for a node voltage, or
+/// `None` for ground, which is not an unknown and is always at zero.
+type PotentialNode = Option<usize>;
+
+/// One edge of that graph, as stored on the vertex it leaves: the vertex it reaches, the voltage
+/// `v(this) - v(that)` the condition declares *in that direction*, and the element that declared
+/// it, for diagnostics. Each condition contributes two, one per direction.
+type PotentialEdge<'a> = (PotentialNode, f64, &'a str);
+
+fn assign_capacitor_potentials(
+    conditions: &[InitialCondition],
+    environment: &BTreeMap<String, f64>,
+    tolerance: f64,
+    x: &mut [f64],
+    assigned: &mut [bool],
+) -> Result<(), InitialStateError> {
+    let mut edges: BTreeMap<PotentialNode, Vec<PotentialEdge<'_>>> = BTreeMap::new();
+    for condition in conditions {
+        let InitialCondition::CapacitorVoltage {
+            element,
+            positive,
+            negative,
+            value,
+        } = condition
+        else {
+            continue;
+        };
+        let volts = value.evaluate(environment)?;
+        edges
+            .entry(*positive)
+            .or_default()
+            .push((*negative, volts, element.as_str()));
+        edges
+            .entry(*negative)
+            .or_default()
+            .push((*positive, -volts, element.as_str()));
+    }
+
+    let mut potential: BTreeMap<PotentialNode, f64> = BTreeMap::new();
+    // `BTreeMap` iteration puts `None` (ground) first and then ascending node indices, which is
+    // exactly the root order this method documents.
+    let roots: Vec<PotentialNode> = edges.keys().copied().collect();
+    for root in roots {
+        if potential.contains_key(&root) {
+            continue;
+        }
+        potential.insert(root, 0.0);
+        let mut queue = std::collections::VecDeque::from([root]);
+        while let Some(node) = queue.pop_front() {
+            let here = potential[&node];
+            for (neighbor, delta, element) in edges.get(&node).into_iter().flatten() {
+                // `delta` is `v(node) - v(neighbor)` as stored above.
+                let implied = here - delta;
+                match potential.get(neighbor) {
+                    Some(known) => {
+                        let scale = known.abs().max(implied.abs()).max(1.0);
+                        if (known - implied).abs() > tolerance * scale {
+                            return Err(InitialStateError::ConflictingConditions {
+                                element: (*element).to_string(),
+                                implied: here - known,
+                                declared: *delta,
+                            });
+                        }
+                    }
+                    None => {
+                        potential.insert(*neighbor, implied);
+                        queue.push_back(*neighbor);
+                    }
+                }
+            }
+        }
+    }
+
+    for (node, volts) in potential {
+        if let Some(index) = node {
+            x[index] = volts;
+            assigned[index] = true;
+        }
+    }
+    Ok(())
+}
+
+/// Reports an assignment that violates one of the circuit's own algebraic equations.
+///
+/// Only rows with an all-zero `K` row are checked: a row with storage in it describes a
+/// derivative this method says nothing about, so its residual at `t = 0` is not a contradiction
+/// — it is the current that starts flowing. And within those rows, only the ones every one of
+/// whose unknowns is assigned: a row with a free unknown left in it is a row the circuit can
+/// still satisfy on its own, and the first solved step is where that happens.
+fn check_assignment_against_circuit(
+    numeric: &crate::NumericMnaSystem,
+    x: &[f64],
+    assigned: &[bool],
+    tolerance: f64,
+) -> Result<(), InitialStateError> {
+    let order = x.len();
+    for row in 0..order {
+        if (0..order).any(|col| numeric.k[(row, col)] != 0.0) {
+            continue;
+        }
+        let contributing: Vec<usize> = (0..order)
+            .filter(|col| numeric.a[(row, *col)] != 0.0)
+            .collect();
+        if contributing.is_empty() || !contributing.iter().all(|col| assigned[*col]) {
+            continue;
+        }
+        let mut residual = -numeric.u[row];
+        let mut scale = numeric.u[row].abs();
+        for col in contributing {
+            let term = numeric.a[(row, col)] * x[col];
+            residual += term;
+            scale = scale.max(term.abs());
+        }
+        if residual.abs() > tolerance * scale.max(1.0) {
+            return Err(InitialStateError::InconsistentWithCircuit {
+                constraint: numeric.unknowns[row].clone(),
+                residual,
+            });
+        }
+    }
+    Ok(())
 }
 
 impl NumericMnaSystem {

@@ -35,11 +35,14 @@ modified or imported by this repository.
   potentially different ones every call. See
   `NumericMnaSystem::input_values`/`::u` below.
 - Mutual inductance with the SPICE relation `M = k*sqrt(L1*L2)`.
-- `ic=` initial conditions on `C` and `L`, turned into a consistent starting state by
+- `ic=` initial conditions on `C` and `L`, assigned into the starting state vector by
   `MnaSystem::initial_state` — see [Initial conditions](#initial-conditions-ic) below.
-- Trailing parameters on a stamped device card are checked, not discarded: an unrecognized
-  `key=value`, or a stray extra value on an `R`/`C`/`L`, is a build error naming the line and
-  the device, in the same shape as the block (`kind=...`) parser's own diagnostics.
+- Trailing parameters on a stamped device card are checked, not discarded — both the
+  `key=value` fields and the positional ones, each against what that device letter's grammar
+  actually permits. A build error names the line and the device, in the same shape as the block
+  (`kind=...`) parser's own diagnostics. See
+  [Device-card parameter checking](#device-card-parameter-checking) below, including what is
+  deliberately left unchecked and why.
 - Case-insensitive node, element, and controlling-source lookup.
 - SPICE numeric suffixes (`k`, `meg`, `m`, `u`, `n`, `p`, and others).
 - Explicit errors for devices with no linear-or-externally-parameterized
@@ -85,25 +88,92 @@ puts `+1` in its first node's KCL row — a positive branch current leaves that 
 the element. Writing `L1 b a 5e-6 ic=12` therefore declares the *opposite* physical current,
 which is the mistake worth checking for first when an inductor starts a run backwards.
 
-#### It is a solve, not an assignment
+#### It is an assignment, not a solve
 
-The remaining unknowns are not free — KCL still has to hold, and a source still has to supply
-whatever the constrained state draws — so `initial_state` solves the textbook constrained
-operating point at `t = 0`:
+This is what "use initial conditions" means: the operating point is *skipped*. The declared
+states are written into `x`, every other unknown starts at rest, and the system that actually
+gets solved is not touched at all — no element is swapped for a source, nothing is opened or
+shorted, and no auxiliary unknown is introduced, so the `unknowns` ordering (a public contract
+of this crate) cannot move.
 
-| At `t = 0` | becomes |
+| unknown | at `t = 0` |
 |---|---|
-| capacitor **with** `ic` | an ideal voltage source of that value |
-| capacitor **without** `ic` | an open circuit |
-| inductor **with** `ic` | an ideal current source of that value |
-| inductor **without** `ic` | a short circuit |
+| an `ic`-bearing inductor's `I(<name>)` | the declared current |
+| an `ic`-bearing capacitor's node-voltage *difference* | the declared voltage |
+| everything else — other node voltages, source branch currents, `ic`-free storage | `0` |
 
-Each `ic`-bearing capacitor needs one auxiliary branch-current unknown; those are appended after
-every existing unknown and dropped from the result, so the `unknowns` ordering — a public
-contract of this crate — does not move, and a capacitor floating between two non-ground nodes
-works like any other. An `ic` that contradicts the circuit (one forced directly across an ideal
-voltage source, say), or a node left with no DC path once the table above is applied, is
-reported as `InitialStateError::Singular` rather than silently producing a meaningless vector.
+A capacitor's condition is a statement about two unknowns, not one, so the `ic`-bearing
+capacitors are treated as a graph over nodes — one edge per condition — and each connected
+component's potentials are propagated from a root at `0`: ground when the component touches
+ground, otherwise the component's lowest-indexed node, since a floating island's absolute
+potential is not something the netlist declared. A series chain and a floating island both come
+out right, and the result does not depend on the order the cards appear in.
+
+The returned vector therefore need not satisfy the circuit's algebraic constraints, exactly like
+any hand-built starting vector. That is not a defect: a first backward-Euler step re-imposes
+them. It is also the visible difference from a constrained operating-point *solve*, which would
+let the rest of the circuit move to accommodate a value the netlist only ever declared about one
+element, and would hand back an `ic`-free capacitor pre-charged by a circuit that has not run
+yet.
+
+#### What is reported rather than silently overridden
+
+- `ic=` values that contradict *each other* — a loop of `ic`-bearing capacitors whose declared
+  voltages do not sum to zero — are `InitialStateError::ConflictingConditions`.
+- An assignment that violates one of the circuit's own algebraic equations, in which every
+  unknown is fixed by an `ic=`, is `InitialStateError::InconsistentWithCircuit`. That covers an
+  `ic` on a capacitor wired directly across an ideal voltage source (the source's branch
+  equation already fixes that voltage) and two series inductors whose `ic` values declare
+  different currents (the shared node's KCL row already fixes them equal). Only equations with
+  no `K` row are checked, and only those all of whose unknowns are assigned: an equation with a
+  free unknown in it, or with storage in it, is one the circuit can still satisfy on its own,
+  and the first solved step is where that happens.
+
+### Device-card parameter checking
+
+`general-spice-core` hands every token after a device card's node list over uninterpreted, so a
+token this crate does not read is one it would otherwise drop in silence — leaving a plausible
+waveform for a circuit nobody wrote. Every card this crate has a stamp for is therefore held to
+its letter's own grammar, before any indexing or stamping:
+
+| letter | positional parameters accepted |
+|---|---|
+| `R`, `C`, `L` | exactly one value |
+| `K` | exactly one value, the coupling coefficient |
+| `E`, `G` (classic four-node form) | exactly one value, the gain |
+| `F`, `H` | exactly two: a controlling source's name, then a gain |
+| `V`, `I` | a bare leading DC value and/or `DC <value>`, an `AC <magnitude> [<phase>]` specification, and at most one `SIN`/`PULSE`/`EXP`/`PWL`/`SFFM` call whose arguments parse as that function's own parameter list |
+| `D` | a model name, an optional area factor, an optional `OFF` |
+
+`key=value` fields are checked separately against the (short) list each letter accepts: `ic` on
+`C` and `L`, nothing anywhere else. `V1 1 0 10 wibble`, `V1 1 0 SNI(0 10 1000)`,
+`V1 1 0 PWL(0 0 1m)`, `R1 a 0 1000 tc1=0.001` and `C1 b 0 1e-6 wibble=5` are all build errors
+naming the line and the device.
+
+#### Known limits of that checking
+
+These are the tokens a typo can still hide in. They are listed because the alternative is
+pretending the check is total:
+
+- **A diode's model name.** This crate does not stamp a diode from a device model at all (a `D`
+  card becomes the symbolic `{name}_G`/`{name}_Ioff` pair above), so there is no parameter set
+  to check a name against — and even a crate that had one could not settle the question from the
+  netlist alone, because the `.model` card may live behind an `.include` this crate never
+  resolves. An unrecognized name would mean "not found here", not "misspelled".
+- **A controlled source's controlling-source name** is checked, but later and by a different
+  error (`UnknownControllingBranch`), once the branch index exists.
+- **A symbol where an `AC` magnitude or phase belongs.** `AC {gain}` is a legitimate
+  parameterized magnitude and nothing in the token distinguishes it from a misspelling, so at
+  most two value-shaped tokens are consumed after `AC`; a third falls through and is rejected.
+- **Every parameter of a device letter this crate has no stamp for** — `M`, `Q`, `J` and the
+  rest. An `M` card's `L=1u W=10u` is valid netlist text this crate simply has no model for, and
+  those letters are governed by `UnsupportedElementPolicy`: under `Error` the card is already
+  rejected outright, and under `IgnoreWithWarning` the caller has explicitly asked for it to be
+  tolerated with a warning. Field-checking it would turn that tolerance into a hard error, which
+  is a different decision from the one this checking makes.
+- **A switch-assigned element's positional parameters.** Its value is replaced wholesale by the
+  configured on/off resistance, so its own grammar is not this crate's to enforce; its
+  `key=value` fields are still checked.
 
 ### Numeric evaluation of source values (`NumericMnaSystem`)
 

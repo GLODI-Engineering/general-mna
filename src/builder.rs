@@ -129,8 +129,16 @@ impl MnaBuilder {
             .collect();
 
         for element in &elements {
-            if self.switch_state(element).is_some() || is_stamped_letter(element.device_letter) {
-                validate_trailing_fields(element)?;
+            // A switch-assigned element is stamped as a plain on/off admittance whatever its
+            // device letter, so its own positional grammar is not this crate's to enforce --
+            // only its `key=value` tokens, which would still be silently dropped.
+            let grammar = match self.switch_state(element) {
+                Some(_) => Some(PositionalGrammar::Unchecked),
+                None if is_stamped_letter(element.device_letter) => positional_grammar(element),
+                None => None,
+            };
+            if let Some(grammar) = grammar {
+                validate_trailing_fields(element, grammar)?;
             }
         }
 
@@ -168,7 +176,7 @@ impl MnaBuilder {
                     return Err(BuildError::DuplicateElement(element.name.clone()));
                 }
                 inputs.push(element.name.clone());
-                if let Some(transient_fn) = TransientFunction::parse(&element.raw_params) {
+                if let Some(transient_fn) = TransientFunction::parse_params(&element.raw_params) {
                     // A time-varying source is stamped as a named symbol, not a baked
                     // literal, exactly like a PWL diode's own `{name}_Ioff` just below --
                     // the caller supplies its numeric value fresh at every step via
@@ -643,16 +651,50 @@ fn accepted_fields(device_letter: char) -> &'static [&'static str] {
     }
 }
 
-/// Device letters whose positional (non-`key=value`) parameter list is closed and exactly one
-/// token long — the element's own value — so a second positional token is certainly a mistake.
+/// What a stamped device letter's *positional* (non-`key=value`) parameter list may contain.
 ///
-/// Every other stamped letter has an open positional grammar this crate reads leniently and
-/// cannot check this cheaply: `DC`/`AC` specifiers and transient-function tokens on `V`/`I`, a
-/// model name on `D`, a controlling-source name plus gain on `E`/`F`/`G`/`H`, and a
-/// variable-length inductor list on `K`. Those letters still get their `key=value` tokens
-/// checked, which is where the silent-drop bug actually bites.
-fn takes_exactly_one_value(device_letter: char) -> bool {
-    matches!(device_letter, 'R' | 'C' | 'L')
+/// `general-spice-core` hands every token after the node list over uninterpreted, so a
+/// positional token this crate does not read is dropped exactly as silently as an unknown
+/// field was before — `V1 1 0 10 wibble` and `V1 1 0 SNI(0 1 1k)` both used to simulate a
+/// plain 10 V / 0 V source and say nothing. These are the shapes each letter actually permits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PositionalGrammar {
+    /// Exactly one token, the element's own value. `R`/`C`/`L` (resistance, capacitance,
+    /// inductance), `K` (coupling coefficient — `general-spice-core` puts every earlier token
+    /// in `nodes` as an inductor name), and `E`/`G` in the classic four-node form, whose single
+    /// parameter is the gain.
+    OneValue,
+    /// Exactly two tokens: a controlling source's name, then a gain — `F`/`H`. The name itself
+    /// is checked later, by `UnknownControllingBranch`.
+    ControlAndGain,
+    /// An independent source's clause list — `V`/`I`. See [`validate_source_positional`].
+    SourceClauses,
+    /// A diode's model name, optional area factor and optional `OFF` — `D`. See
+    /// [`validate_diode_positional`], including what about it is deliberately not checked.
+    DiodeModel,
+    /// Positional tokens this crate deliberately does not check, while still checking the
+    /// card's `key=value` fields. Used for a switch-assigned element, whose parameters are
+    /// replaced wholesale by the on/off resistance.
+    Unchecked,
+}
+
+/// The positional grammar to hold `element` to, or `None` to skip validating the card entirely.
+///
+/// `None` is only ever returned for the two-node behavioral form of `E`/`G`
+/// (`E1 out 0 VALUE={...}` / `TABLE` / `POLY`), which this crate does not stamp at all: its
+/// tokens are neither a gain nor `key=value` fields, and `four_nodes` already rejects the card
+/// with a message that says exactly what is missing ("requires the classic four-node linear
+/// form"). Field-checking it first would replace that with a misleading `unknown field 'value'`.
+fn positional_grammar(element: &ElementInstance) -> Option<PositionalGrammar> {
+    match element.device_letter {
+        'R' | 'C' | 'L' | 'K' => Some(PositionalGrammar::OneValue),
+        'E' | 'G' if element.nodes.len() == 4 => Some(PositionalGrammar::OneValue),
+        'E' | 'G' => None,
+        'F' | 'H' => Some(PositionalGrammar::ControlAndGain),
+        'V' | 'I' => Some(PositionalGrammar::SourceClauses),
+        'D' => Some(PositionalGrammar::DiodeModel),
+        _ => Some(PositionalGrammar::Unchecked),
+    }
 }
 
 /// Splits a raw trailing token into `(key, value)` if it has the `key=value` shape, with the key
@@ -672,25 +714,21 @@ fn as_field(token: &str) -> Option<(String, &str)> {
 /// Mirrors the block (`kind=...`) parser's own diagnostics in
 /// [`crate::system_builder`] — same `line N: device '<name>' ...` shape — so a device card and a
 /// block line report a bad field the same way.
-fn validate_trailing_fields(element: &ElementInstance) -> Result<(), BuildError> {
+///
+/// Two passes, because they fail for different reasons: every `key=value` token is checked
+/// against [`accepted_fields`], and whatever is left over — the positional tokens, in order —
+/// is checked against the letter's own [`PositionalGrammar`].
+fn validate_trailing_fields(
+    element: &ElementInstance,
+    grammar: PositionalGrammar,
+) -> Result<(), BuildError> {
     let letter = element.device_letter;
     let accepted = accepted_fields(letter);
-    let mut positional = 0usize;
+    let mut positional: Vec<&str> = Vec::new();
 
     for token in &element.raw_params {
         let Some((key, _)) = as_field(token) else {
-            positional += 1;
-            if takes_exactly_one_value(letter) && positional > 1 {
-                return Err(BuildError::InvalidElementField {
-                    line: element.span.start,
-                    name: element.name.clone(),
-                    message: format!(
-                        "unexpected extra parameter '{token}' (device {letter} takes exactly one \
-                         value{})",
-                        accepted_suffix(accepted)
-                    ),
-                });
-            }
+            positional.push(token.as_str());
             continue;
         };
         if accepted.iter().any(|allowed| *allowed == key) {
@@ -709,6 +747,238 @@ fn validate_trailing_fields(element: &ElementInstance) -> Result<(), BuildError>
                 ),
             },
         });
+    }
+
+    match grammar {
+        PositionalGrammar::OneValue if positional.len() > 1 => Err(field_error(
+            element,
+            format!(
+                "unexpected extra parameter '{}' (device {letter} takes exactly one value{})",
+                positional[1],
+                accepted_suffix(accepted)
+            ),
+        )),
+        PositionalGrammar::ControlAndGain if positional.len() > 2 => Err(field_error(
+            element,
+            format!(
+                "unexpected extra parameter '{}' (device {letter} takes exactly two values, a \
+                 controlling source name and a gain)",
+                positional[2]
+            ),
+        )),
+        PositionalGrammar::SourceClauses => validate_source_positional(element, &positional),
+        PositionalGrammar::DiodeModel => validate_diode_positional(element, &positional),
+        _ => Ok(()),
+    }
+}
+
+/// A positional-token diagnostic on `element`, in the same shape as the field diagnostics above.
+fn field_error(element: &ElementInstance, message: String) -> BuildError {
+    BuildError::InvalidElementField {
+        line: element.span.start,
+        name: element.name.clone(),
+        message,
+    }
+}
+
+/// Whether `token` is a value this crate can read — a SPICE number with or without a suffix, a
+/// symbol resolved later from `.param`, or a braced expression. Not a judgement about physical
+/// units, only about shape.
+fn is_value_token(token: &str) -> bool {
+    Expression::parse_scalar(token).is_ok()
+}
+
+/// Validates the positional parameters of an independent source card (`V`/`I`).
+///
+/// The grammar is a sequence of clauses, in any order, each of which this crate either reads or
+/// knowingly ignores:
+///
+/// - a bare value as the very first token — the implicit DC value (`V1 1 0 10`);
+/// - `DC <value>` — the explicit spelling of the same thing;
+/// - `AC <magnitude> [<phase>]` — read by no analysis this crate implements yet, but valid, and
+///   so accepted rather than rejected;
+/// - one call to one of [`TransientFunction::FUNCTION_NAMES`], whose arguments must actually
+///   parse as that function's parameter list.
+///
+/// Anything else is a typo. A second bare value (`V1 1 0 10 20`), a trailing word
+/// (`V1 1 0 10 wibble`), a misspelled function (`SNI(0 1 1k)`), a `DC` with nothing after it,
+/// and an unterminated argument list are all rejected here instead of being dropped.
+///
+/// Deliberately not checked: a symbol where an `AC` magnitude or phase belongs. `AC {gain}` is
+/// a legitimate parameterized magnitude, and nothing in the token itself distinguishes it from
+/// a misspelling, so at most two value-shaped tokens are consumed after `AC` and a third one
+/// falls through to the "unexpected extra value" arm.
+fn validate_source_positional(
+    element: &ElementInstance,
+    positional: &[&str],
+) -> Result<(), BuildError> {
+    let letter = element.device_letter;
+    let mut index = 0usize;
+    let mut seen_dc = false;
+    let mut seen_ac = false;
+    let mut seen_function = false;
+
+    while index < positional.len() {
+        let token = positional[index];
+        if token.eq_ignore_ascii_case("dc") {
+            if seen_dc {
+                return Err(field_error(
+                    element,
+                    format!("device {letter} declares a DC value more than once"),
+                ));
+            }
+            seen_dc = true;
+            match positional.get(index + 1) {
+                Some(value) if is_value_token(value) => index += 2,
+                Some(value) => {
+                    return Err(field_error(
+                        element,
+                        format!("'dc' is followed by '{value}', which is not a value"),
+                    ))
+                }
+                None => {
+                    return Err(field_error(
+                        element,
+                        "'dc' is not followed by a value".to_string(),
+                    ))
+                }
+            }
+        } else if token.eq_ignore_ascii_case("ac") {
+            if seen_ac {
+                return Err(field_error(
+                    element,
+                    format!("device {letter} declares an AC specification more than once"),
+                ));
+            }
+            seen_ac = true;
+            let mut consumed = 0usize;
+            while consumed < 2 {
+                match positional.get(index + 1 + consumed) {
+                    Some(next)
+                        if !next.eq_ignore_ascii_case("dc")
+                            && !next.eq_ignore_ascii_case("ac")
+                            && !next.contains('(')
+                            && is_value_token(next) =>
+                    {
+                        consumed += 1
+                    }
+                    _ => break,
+                }
+            }
+            if consumed == 0 {
+                return Err(field_error(
+                    element,
+                    "'ac' is not followed by a magnitude".to_string(),
+                ));
+            }
+            index += 1 + consumed;
+        } else if let Some(paren) = token.find('(') {
+            let name = &token[..paren];
+            if !TransientFunction::is_function_name(name) {
+                return Err(field_error(
+                    element,
+                    format!(
+                        "unknown source function '{name}' (device {letter} accepts {})",
+                        TransientFunction::FUNCTION_NAMES.join("/")
+                    ),
+                ));
+            }
+            if seen_function {
+                return Err(field_error(
+                    element,
+                    format!("device {letter} declares more than one transient function"),
+                ));
+            }
+            seen_function = true;
+            let Some(end) = positional[index..]
+                .iter()
+                .position(|token| token.contains(')'))
+                .map(|offset| offset + index)
+            else {
+                return Err(field_error(
+                    element,
+                    format!("'{name}(' is never closed by a ')'"),
+                ));
+            };
+            let call: Vec<String> = positional[index..=end]
+                .iter()
+                .map(|token| (*token).to_string())
+                .collect();
+            if TransientFunction::parse(&call).is_none() {
+                return Err(field_error(
+                    element,
+                    format!("'{}' is not a valid {name} parameter list", call.join(" ")),
+                ));
+            }
+            index = end + 1;
+        } else if index == 0 && is_value_token(token) {
+            // The implicit DC value, which SPICE allows only in first position.
+            seen_dc = true;
+            index += 1;
+        } else {
+            return Err(field_error(
+                element,
+                format!(
+                    "unexpected extra parameter '{token}' (device {letter} takes a DC value, an \
+                     'ac' specification, and/or one of {}{})",
+                    TransientFunction::FUNCTION_NAMES.join("/"),
+                    accepted_suffix(accepted_fields(letter))
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Validates the positional parameters of a diode card (`D`).
+///
+/// SPICE's grammar here is a model name, an optional area factor and an optional `OFF` hint, so
+/// at most one non-`OFF` token beyond the model name is permitted, it has to be value-shaped,
+/// and `OFF` may not be repeated.
+///
+/// **The model name itself is deliberately not checked, and cannot be.** This crate does not
+/// stamp a diode from a device model at all — a `D` card becomes a symbolic conductance
+/// `{name}_G` plus a Norton current `{name}_Ioff` that the caller resolves per timestep (see
+/// the `'D'` arm of `build_statements`), so there is no model parameter set here to check a
+/// name against. Even a crate that did have one could not decide the question from the netlist
+/// alone: the `.model` card may live behind an `.include` this crate never resolves, so an
+/// unrecognized name means "not found here", not "misspelled". A misspelled diode model name
+/// is therefore a known, documented limit of this validation, recorded in the README.
+fn validate_diode_positional(
+    element: &ElementInstance,
+    positional: &[&str],
+) -> Result<(), BuildError> {
+    let mut off = 0usize;
+    let mut values: Vec<&str> = Vec::new();
+    for token in positional {
+        if token.eq_ignore_ascii_case("off") {
+            off += 1;
+        } else {
+            values.push(token);
+        }
+    }
+    if off > 1 {
+        return Err(field_error(
+            element,
+            "'off' is given more than once".to_string(),
+        ));
+    }
+    if let Some(area) = values.get(1) {
+        if !is_value_token(area) {
+            return Err(field_error(
+                element,
+                format!("'{area}' is not a value (device D's second parameter is its area factor)"),
+            ));
+        }
+    }
+    if let Some(extra) = values.get(2) {
+        return Err(field_error(
+            element,
+            format!(
+                "unexpected extra parameter '{extra}' (device D takes a model name, an optional \
+                 area factor and an optional 'off')"
+            ),
+        ));
     }
     Ok(())
 }
@@ -749,17 +1019,39 @@ fn scalar_value(element: &ElementInstance) -> Result<Expression, BuildError> {
     })
 }
 
+/// The DC value an independent source card declares, for a card
+/// [`TransientFunction::parse_params`] found no waveform in.
+///
+/// Only the DC clause is read: an explicit `DC <value>`, or a bare leading value, which SPICE
+/// allows as the implicit spelling of the same thing. A card that declares neither -- one
+/// carrying only an `AC` specification, say -- has a DC value of zero, SPICE's own default,
+/// rather than whatever `AC` happens to tokenize into. (It used to be read as `params.first()`
+/// unconditionally, which turned `V1 1 0 AC 1` into a source whose value was a symbol named
+/// `AC`.) `key=value` tokens are skipped: they are fields, already validated, never the value.
 fn source_value(element: &ElementInstance) -> Result<Expression, BuildError> {
-    let params = &element.raw_params;
-    let raw = params
+    let params: Vec<&str> = element
+        .raw_params
+        .iter()
+        .filter(|token| as_field(token).is_none())
+        .map(|token| token.as_str())
+        .collect();
+    let raw = match params
         .iter()
         .position(|token| token.eq_ignore_ascii_case("dc"))
         .and_then(|index| params.get(index + 1))
-        .or_else(|| params.first())
-        .ok_or_else(|| BuildError::InvalidElement {
-            name: element.name.clone(),
-            message: "has no source value".into(),
-        })?;
+    {
+        Some(value) => *value,
+        None => match params.first() {
+            Some(first) if !first.eq_ignore_ascii_case("ac") && !first.contains('(') => *first,
+            Some(_) => return Ok(Expression::zero()),
+            None => {
+                return Err(BuildError::InvalidElement {
+                    name: element.name.clone(),
+                    message: "has no source value".into(),
+                })
+            }
+        },
+    };
     Expression::parse_scalar(raw).map_err(|message| BuildError::InvalidElement {
         name: element.name.clone(),
         message,

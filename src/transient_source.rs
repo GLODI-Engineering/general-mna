@@ -235,6 +235,54 @@ impl TransientFunction {
         }
     }
 
+    /// The names of the five transient-function forms this type implements, uppercase, in the
+    /// order they are declared above, and exactly the set [`Self::parse`]'s own match arms
+    /// cover (a unit test below asserts that, so the two cannot drift). [`Self::parse_params`]
+    /// scans for these names, and `builder.rs`'s device-card validation rejects a misspelled
+    /// one (`SNI(...)`) by asking whether the name is in here rather than by writing the list
+    /// out a second time.
+    pub const FUNCTION_NAMES: [&'static str; 5] = ["SIN", "PULSE", "EXP", "PWL", "SFFM"];
+
+    /// Whether `name` (compared case-insensitively) is one of [`Self::FUNCTION_NAMES`].
+    pub fn is_function_name(name: &str) -> bool {
+        Self::FUNCTION_NAMES
+            .iter()
+            .any(|known| name.eq_ignore_ascii_case(known))
+    }
+
+    /// The token range of the first transient-function call inside an independent source's
+    /// parameter list, as `(first, last)` inclusive indices into `tokens`, or `None` if the
+    /// list contains no recognized call.
+    ///
+    /// Needed because the call is *not* always the first parameter: `V1 1 0 DC 0 SIN(0 1 1k)`
+    /// is ordinary SPICE, and scanning only `tokens[0]` (which is all [`Self::parse`] does, by
+    /// design — it takes a slice that already starts at the call) silently dropped the whole
+    /// waveform and simulated a flat 0 V source instead. The end index is the token carrying
+    /// the closing `)`, since `general-spice-core` splits `SIN(0 10 1000)` across three tokens.
+    pub fn find_call(tokens: &[String]) -> Option<(usize, usize)> {
+        let first = tokens.iter().position(|token| {
+            token
+                .find('(')
+                .is_some_and(|paren| Self::is_function_name(&token[..paren]))
+        })?;
+        let last = tokens[first..]
+            .iter()
+            .position(|token| token.contains(')'))?
+            + first;
+        Some((first, last))
+    }
+
+    /// Parses the first transient-function call appearing anywhere in an independent source's
+    /// parameter list, or `None` when it contains none.
+    ///
+    /// This is what a caller holding a whole `V`/`I` card's `raw_params` wants;
+    /// [`Self::parse`] is the narrower primitive that assumes the slice already begins at the
+    /// call. See [`Self::find_call`] for why the difference matters.
+    pub fn parse_params(tokens: &[String]) -> Option<TransientFunction> {
+        let (first, last) = Self::find_call(tokens)?;
+        Self::parse(&tokens[first..=last])
+    }
+
     /// Detects and parses one of the five transient-function forms from an already-tokenized
     /// parameter list (as `general-spice-core` hands back — see the module doc comment for exactly how
     /// mangled that tokenization is: parentheses stuck to whichever token they landed on).
@@ -436,5 +484,49 @@ mod tests {
             }
             other => panic!("expected Sin, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn function_names_are_exactly_what_parse_dispatches_on() {
+        // Keeps `FUNCTION_NAMES` and `parse`'s own match arms from drifting apart, which would
+        // make `builder.rs` bless a call it then refuses to parse, or vice versa.
+        for name in TransientFunction::FUNCTION_NAMES {
+            assert!(
+                TransientFunction::parse(&toks(&format!("{name}(0 1 2 3 4 5)"))).is_some(),
+                "{name} is listed in FUNCTION_NAMES but parse does not accept it"
+            );
+        }
+        assert!(TransientFunction::parse(&toks("SNI(0 1 2)")).is_none());
+        assert!(TransientFunction::is_function_name("sin"));
+        assert!(!TransientFunction::is_function_name("sni"));
+    }
+
+    #[test]
+    fn a_function_call_is_found_after_a_dc_clause() {
+        // The bug: `parse` alone only ever looks at token 0, so this card used to simulate a
+        // flat 0 V source and drop the sinusoid without a word.
+        let tokens = toks("DC 0 SIN(0 10 1000)");
+        assert_eq!(TransientFunction::find_call(&tokens), Some((2, 4)));
+        match TransientFunction::parse_params(&tokens).unwrap() {
+            TransientFunction::Sin { v0, va, freq, .. } => {
+                assert_eq!((v0, va, freq), (0.0, 10.0, 1000.0));
+            }
+            other => panic!("expected Sin, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_params_is_unchanged_for_a_call_in_the_first_position() {
+        let tokens = toks("PULSE(0 5 1m 100n 100n 2m 4m)");
+        assert_eq!(
+            TransientFunction::parse_params(&tokens),
+            TransientFunction::parse(&tokens)
+        );
+    }
+
+    #[test]
+    fn parse_params_finds_nothing_in_a_plain_dc_card() {
+        assert!(TransientFunction::parse_params(&toks("DC 10")).is_none());
+        assert!(TransientFunction::parse_params(&toks("10")).is_none());
     }
 }
