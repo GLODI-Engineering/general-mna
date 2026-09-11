@@ -4,7 +4,7 @@ use std::fmt;
 use general_spice_core::ast::{ElementInstance, Statement};
 use general_spice_core::{lexer, parser, Dialect};
 
-use crate::{Expression, Matrix, MnaSystem, TransientFunction};
+use crate::{Expression, InitialCondition, Matrix, MnaSystem, TransientFunction};
 
 /// Treatment of parsed devices for which this linear MNA crate has no stamp.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -128,6 +128,12 @@ impl MnaBuilder {
             })
             .collect();
 
+        for element in &elements {
+            if self.switch_state(element).is_some() || is_stamped_letter(element.device_letter) {
+                validate_trailing_fields(element)?;
+            }
+        }
+
         let mut index = UnknownIndex::default();
         for element in &elements {
             if element.device_letter == 'K' {
@@ -188,6 +194,46 @@ impl MnaBuilder {
                 }
                 inputs.push(element.name.clone());
                 input_values.push(Expression::symbol(format!("{}_Ioff", element.name)));
+            }
+        }
+
+        // `ic=` initial conditions, resolved against the unknown ordering now that `index` is
+        // final. Deliberately collected *after* stamping and kept out of `a`/`k`/`b`/`u`: an
+        // initial condition constrains `x` at one instant, it does not change the circuit's
+        // equations. `MnaSystem::initial_state` turns these into a consistent starting vector.
+        let mut initial_conditions = Vec::new();
+        for element in &elements {
+            if self.switch_state(element).is_some() {
+                continue;
+            }
+            let Some(raw) = initial_condition_field(element) else {
+                continue;
+            };
+            let value = Expression::parse_scalar(raw).map_err(|message| {
+                BuildError::InvalidElementField {
+                    line: element.span.start,
+                    name: element.name.clone(),
+                    message: format!("field 'ic' is not a value: {message}"),
+                }
+            })?;
+            match element.device_letter {
+                'C' => {
+                    let (positive, negative) = two_nodes(element)?;
+                    initial_conditions.push(InitialCondition::CapacitorVoltage {
+                        element: element.name.clone(),
+                        positive: index.node(positive),
+                        negative: index.node(negative),
+                        value,
+                    });
+                }
+                'L' => initial_conditions.push(InitialCondition::InductorCurrent {
+                    element: element.name.clone(),
+                    branch: index.branch(&element.name)?,
+                    value,
+                }),
+                // Unreachable: `accepted_fields` only offers `ic` on `C`/`L`, so any other
+                // letter carrying one was already rejected by `validate_trailing_fields`.
+                _ => unreachable!("ic= accepted only on C and L"),
             }
         }
 
@@ -282,6 +328,7 @@ impl MnaBuilder {
             inputs,
             input_values,
             transient_sources,
+            initial_conditions,
             parameter_defaults,
             warnings,
         })
@@ -567,6 +614,127 @@ fn stamp_mutual_inductance(
     Ok(())
 }
 
+/// Device letters this crate has a linear stamp for, and therefore holds to a known parameter
+/// grammar. Anything else is `UnsupportedElementPolicy`'s business (error, or skip with a
+/// warning) and is deliberately *not* field-checked here: a `M`/`Q`/`J` card's own `L=1u W=10u`
+/// is perfectly valid netlist text this crate simply has no model for, and rejecting its fields
+/// would turn `IgnoreWithWarning` into a hard error.
+fn is_stamped_letter(device_letter: char) -> bool {
+    matches!(
+        device_letter,
+        'R' | 'C' | 'L' | 'K' | 'V' | 'I' | 'E' | 'F' | 'G' | 'H' | 'D'
+    )
+}
+
+/// The trailing `key=value` fields this crate understands on a device card it stamps, keyed by
+/// device letter and compared case-insensitively.
+///
+/// `general-spice-core` deliberately hands every token after the node list over uninterpreted,
+/// in [`ElementInstance::raw_params`]; deciding what they mean is this crate's job. Any key not
+/// listed here is rejected rather than dropped, because dropping it is not a harmless no-op —
+/// a silently ignored `tc1=`/`temp=`/`m=`, or a misspelled `ic=`, produces a plausible-looking
+/// waveform for a *different* circuit than the one the author wrote, with nothing on screen to
+/// say so.
+fn accepted_fields(device_letter: char) -> &'static [&'static str] {
+    match device_letter {
+        // See `MnaSystem::initial_conditions` for what `ic=` means on each, sign included.
+        'C' | 'L' => &["ic"],
+        _ => &[],
+    }
+}
+
+/// Device letters whose positional (non-`key=value`) parameter list is closed and exactly one
+/// token long — the element's own value — so a second positional token is certainly a mistake.
+///
+/// Every other stamped letter has an open positional grammar this crate reads leniently and
+/// cannot check this cheaply: `DC`/`AC` specifiers and transient-function tokens on `V`/`I`, a
+/// model name on `D`, a controlling-source name plus gain on `E`/`F`/`G`/`H`, and a
+/// variable-length inductor list on `K`. Those letters still get their `key=value` tokens
+/// checked, which is where the silent-drop bug actually bites.
+fn takes_exactly_one_value(device_letter: char) -> bool {
+    matches!(device_letter, 'R' | 'C' | 'L')
+}
+
+/// Splits a raw trailing token into `(key, value)` if it has the `key=value` shape, with the key
+/// lowercased for the case-insensitive comparison every SPICE dialect expects. A token with no
+/// `=`, or with an empty key (`=5`), is positional, not a field.
+fn as_field(token: &str) -> Option<(String, &str)> {
+    let (key, value) = token.split_once('=')?;
+    let key = key.trim();
+    if key.is_empty() {
+        return None;
+    }
+    Some((key.to_ascii_lowercase(), value))
+}
+
+/// Rejects a trailing token this crate would otherwise silently discard.
+///
+/// Mirrors the block (`kind=...`) parser's own diagnostics in
+/// [`crate::system_builder`] — same `line N: device '<name>' ...` shape — so a device card and a
+/// block line report a bad field the same way.
+fn validate_trailing_fields(element: &ElementInstance) -> Result<(), BuildError> {
+    let letter = element.device_letter;
+    let accepted = accepted_fields(letter);
+    let mut positional = 0usize;
+
+    for token in &element.raw_params {
+        let Some((key, _)) = as_field(token) else {
+            positional += 1;
+            if takes_exactly_one_value(letter) && positional > 1 {
+                return Err(BuildError::InvalidElementField {
+                    line: element.span.start,
+                    name: element.name.clone(),
+                    message: format!(
+                        "unexpected extra parameter '{token}' (device {letter} takes exactly one \
+                         value{})",
+                        accepted_suffix(accepted)
+                    ),
+                });
+            }
+            continue;
+        };
+        if accepted.iter().any(|allowed| *allowed == key) {
+            continue;
+        }
+        return Err(BuildError::InvalidElementField {
+            line: element.span.start,
+            name: element.name.clone(),
+            message: match accepted {
+                [] => {
+                    format!("unknown field '{key}' (device {letter} accepts no key=value fields)")
+                }
+                _ => format!(
+                    "unknown field '{key}' (device {letter} accepts only: {})",
+                    accepted.join(", ")
+                ),
+            },
+        });
+    }
+    Ok(())
+}
+
+/// The ", plus ..." tail of the extra-positional message, so a resistor (no fields at all) does
+/// not advertise an empty list.
+fn accepted_suffix(accepted: &'static [&'static str]) -> String {
+    match accepted {
+        [] => String::new(),
+        _ => format!(", plus optional {}", accepted.join("/")),
+    }
+}
+
+/// The raw text of a device card's `ic=` field, if it declares one. Already validated as an
+/// accepted key by [`validate_trailing_fields`], so reaching this on anything but `C`/`L` is a
+/// bug, not bad input.
+fn initial_condition_field(element: &ElementInstance) -> Option<&str> {
+    element
+        .raw_params
+        .iter()
+        .find_map(|token| match as_field(token) {
+            Some((key, value)) if key == "ic" => Some(value),
+            _ => None,
+        })
+}
+
 fn scalar_value(element: &ElementInstance) -> Result<Expression, BuildError> {
     let raw = element
         .raw_params
@@ -642,6 +810,16 @@ pub enum BuildError {
         /// Explanation.
         message: String,
     },
+    /// A device card carries a trailing parameter this crate does not recognize. Reported
+    /// rather than silently discarded — see [`validate_trailing_fields`].
+    InvalidElementField {
+        /// 1-based physical line the device card was parsed from.
+        line: usize,
+        /// Element name.
+        name: String,
+        /// Explanation, already phrased to follow `device '<name>' `.
+        message: String,
+    },
     /// Two branch devices have the same case-insensitive name.
     DuplicateElement(String),
     /// A current-controlled source refers to a device without a branch current.
@@ -665,6 +843,11 @@ impl fmt::Display for BuildError {
             Self::InvalidElement { name, message } => {
                 write!(f, "cannot stamp element '{name}': {message}")
             }
+            Self::InvalidElementField {
+                line,
+                name,
+                message,
+            } => write!(f, "line {line}: device '{name}' {message}"),
             Self::DuplicateElement(name) => {
                 write!(f, "duplicate case-insensitive element name '{name}'")
             }

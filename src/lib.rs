@@ -40,10 +40,13 @@ pub use averaging::{average, small_signal_duty_input, AveragingError, WeightedPh
 pub use builder::{BuildError, BuildOptions, MnaBuilder, SwitchState, UnsupportedElementPolicy};
 pub use expression::{EvaluationError, Expression};
 pub use matrix::Matrix;
-pub use numeric::{NumericMnaSystem, NumericStateSpace, StateSpaceError};
+pub use numeric::{
+    InitialStateError, NumericMnaSystem, NumericStateSpace, StateSpaceError,
+    DEFAULT_INITIAL_STATE_TOLERANCE,
+};
 pub use symbolic::{
     faddeev_leverrier, SymbolicStateSpace, SymbolicTransferFunction, TransferFunctionError,
 };
-pub use system::{MnaSystem, StringMnaSystem};
+pub use system::{InitialCondition, MnaSystem, StringMnaSystem};
 pub use system_builder::{build_system, parse_and_flatten, System};
 pub use transient_source::{PwlPoints, TransientFunction};

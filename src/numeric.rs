@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
-use crate::{EvaluationError, Matrix, MnaSystem};
+use crate::{EvaluationError, InitialCondition, Matrix, MnaSystem};
 
 /// Numerically evaluated descriptor system.
 #[derive(Debug, Clone, PartialEq)]
@@ -92,6 +92,184 @@ impl MnaSystem {
             input_values,
             u,
         })
+    }
+}
+
+/// Default pivot tolerance for [`MnaSystem::initial_state`]'s constrained operating-point
+/// solve. Matches the magnitude the state-space reduction in this module is normally called
+/// with; pass an explicit value for a circuit whose element values span a very different range.
+pub const DEFAULT_INITIAL_STATE_TOLERANCE: f64 = 1e-12;
+
+/// Why a netlist's declared `ic=` values could not be turned into a starting state vector.
+#[derive(Debug, Clone, PartialEq)]
+pub enum InitialStateError {
+    /// A component value, or an `ic=` value itself, could not be evaluated numerically.
+    Evaluation(EvaluationError),
+    /// The constrained operating point has no unique solution. Either the `ic=` values
+    /// contradict the circuit (a capacitor's `ic` forced across an ideal voltage source, two
+    /// `ic`-bearing inductors in series disagreeing), or a node is left floating with no DC
+    /// path to anything once every `ic`-free capacitor is opened and every `ic`-free inductor
+    /// shorted.
+    Singular {
+        /// The unknown whose equation had no usable pivot, or a synthetic
+        /// `ic(<element>)` name for one of the auxiliary constraint rows.
+        unknown: String,
+    },
+}
+
+impl fmt::Display for InitialStateError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Evaluation(error) => {
+                write!(f, "cannot evaluate the ic= operating point: {error}")
+            }
+            Self::Singular { unknown } => write!(
+                f,
+                "no unique ic= operating point: the constrained equations have no usable pivot at \
+                 {unknown} — check that the declared ic= values do not contradict the circuit (an \
+                 ic on a capacitor directly across an ideal voltage source, or on series \
+                 inductors that disagree) and that every node still has a DC path once every \
+                 ic-free capacitor is opened and every ic-free inductor shorted"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for InitialStateError {}
+
+impl From<EvaluationError> for InitialStateError {
+    fn from(error: EvaluationError) -> Self {
+        Self::Evaluation(error)
+    }
+}
+
+impl MnaSystem {
+    /// Turns this netlist's declared `ic=` values into a consistent starting state vector, in
+    /// `unknowns` order — what a transient run wants for its `x` at `t = 0`.
+    ///
+    /// Returns `Ok(None)` when the netlist declares no `ic=` at all, so a caller can keep its
+    /// existing "start from rest" default untouched rather than having to special-case an
+    /// all-zero vector.
+    ///
+    /// # What it actually solves
+    ///
+    /// The textbook constrained operating point, not a bare assignment. Each declared value is
+    /// *held*, and the rest of the circuit is solved around it, because the other unknowns are
+    /// not free: node voltages must still satisfy KCL, and a source's branch current must still
+    /// be whatever the constrained state draws from it. Concretely, at `t = 0`:
+    ///
+    /// - every capacitor **with** an `ic` becomes an ideal voltage source of that value;
+    /// - every capacitor **without** one becomes an open circuit (its only matrix entries are
+    ///   in `K`, and `dot(x)` plays no part here);
+    /// - every inductor **with** an `ic` becomes an ideal current source of that value — its
+    ///   own branch equation `v = L*dot(i)` is replaced by `I(<name>) = ic`, while it keeps its
+    ///   incidence in the two node equations, so its current still flows through the circuit;
+    /// - every inductor **without** one becomes a short circuit, its branch equation reducing
+    ///   to `V(p) - V(n) = 0`.
+    ///
+    /// The auxiliary branch-current unknown each `ic`-bearing capacitor needs is appended
+    /// *after* every existing unknown and dropped from the result, so `unknowns` ordering — a
+    /// public contract of this crate — does not move, and the returned vector indexes exactly
+    /// like any other `x`.
+    ///
+    /// # Sign conventions
+    ///
+    /// Stated in full on [`InitialCondition`], and worth repeating for the one that is
+    /// routinely misremembered: an inductor's `ic` is the current flowing **from its first
+    /// node to its second node, through the inductor**. `L1 a b 5e-6 ic=12` puts 12 A into `a`
+    /// and out of `b`; `L1 b a 5e-6 ic=12` is the opposite physical current.
+    ///
+    /// `values` supplies any symbol the netlist left open, exactly as
+    /// [`MnaSystem::evaluate`] takes it. `tolerance` is the pivot threshold; see
+    /// [`DEFAULT_INITIAL_STATE_TOLERANCE`].
+    pub fn initial_state(
+        &self,
+        values: &BTreeMap<String, f64>,
+        tolerance: f64,
+    ) -> Result<Option<Vec<f64>>, InitialStateError> {
+        if self.initial_conditions.is_empty() {
+            return Ok(None);
+        }
+
+        let numeric = self.evaluate(values)?;
+        let order = self.unknowns.len();
+
+        let mut environment = BTreeMap::new();
+        for (name, expression) in &self.parameter_defaults {
+            if let Ok(value) = expression.evaluate(values) {
+                environment.insert(name.clone(), value);
+            }
+        }
+        environment.extend(values.iter().map(|(name, value)| (name.clone(), *value)));
+
+        let capacitors: Vec<&InitialCondition> = self
+            .initial_conditions
+            .iter()
+            .filter(|ic| matches!(ic, InitialCondition::CapacitorVoltage { .. }))
+            .collect();
+        let size = order + capacitors.len();
+
+        let mut coefficients = Matrix::filled(size, size, 0.0);
+        let mut rhs = Matrix::filled(size, 1, 0.0);
+        for row in 0..order {
+            for col in 0..order {
+                coefficients[(row, col)] = numeric.a[(row, col)];
+            }
+            rhs[(row, 0)] = numeric.u[row];
+        }
+
+        // Inductors first: replacing a branch equation in place needs the untouched copy above.
+        for ic in &self.initial_conditions {
+            let InitialCondition::InductorCurrent { branch, value, .. } = ic else {
+                continue;
+            };
+            for col in 0..size {
+                coefficients[(*branch, col)] = 0.0;
+            }
+            coefficients[(*branch, *branch)] = 1.0;
+            rhs[(*branch, 0)] = value.evaluate(&environment)?;
+        }
+
+        for (offset, ic) in capacitors.iter().enumerate() {
+            let InitialCondition::CapacitorVoltage {
+                positive,
+                negative,
+                value,
+                ..
+            } = ic
+            else {
+                continue;
+            };
+            let constraint = order + offset;
+            // The capacitor's own branch current, leaving the first node and entering the
+            // second — the same orientation `stamp_branch_incidence` gives every other branch
+            // device, so the auxiliary unknown reads like an ordinary `I(<name>)`.
+            if let Some(row) = positive {
+                coefficients[(*row, constraint)] = 1.0;
+                coefficients[(constraint, *row)] = 1.0;
+            }
+            if let Some(row) = negative {
+                coefficients[(*row, constraint)] = -1.0;
+                coefficients[(constraint, *row)] = -1.0;
+            }
+            rhs[(constraint, 0)] = value.evaluate(&environment)?;
+        }
+
+        let solution = solve(&coefficients, &rhs, tolerance).map_err(|pivot| {
+            let unknown = match self.unknowns.get(pivot) {
+                Some(name) => name.clone(),
+                None => format!(
+                    "ic({})",
+                    capacitors
+                        .get(pivot - order)
+                        .map(|ic| ic.element())
+                        .unwrap_or("?")
+                ),
+            };
+            InitialStateError::Singular { unknown }
+        })?;
+
+        Ok(Some((0..order).map(|row| solution[(row, 0)]).collect()))
     }
 }
 

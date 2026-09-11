@@ -278,3 +278,259 @@ fn plain_dc_source_is_unaffected_by_transient_source_support() {
     assert_eq!(system.input_values[0].to_string(), "10");
     assert!(system.transient_sources.is_empty());
 }
+
+// ---------------------------------------------------------------------------------------------
+// Unknown trailing fields on a device card (general-mna#2)
+// ---------------------------------------------------------------------------------------------
+
+fn build_error(source: &str) -> BuildError {
+    MnaBuilder::new(Dialect::Ngspice)
+        .build_fragment(source)
+        .unwrap_err()
+}
+
+#[test]
+fn unknown_device_field_is_rejected_with_a_line_numbered_message() {
+    // The bug this test exists for: `wibble=5` used to be dropped without a word, so the deck
+    // ran and produced a plausible waveform for a circuit nobody wrote.
+    let error = build_error("V1 a 0 10\nR1 a b 1000\nC1 b 0 1e-6 wibble=5\n");
+    assert_eq!(
+        error.to_string(),
+        "line 3: device 'C1' unknown field 'wibble' (device C accepts only: ic)"
+    );
+}
+
+#[test]
+fn unknown_device_field_names_a_letter_with_no_fields_at_all() {
+    let error = build_error("V1 a 0 10\nR1 a 0 1000 tc1=0.001\n");
+    assert_eq!(
+        error.to_string(),
+        "line 2: device 'R1' unknown field 'tc1' (device R accepts no key=value fields)"
+    );
+}
+
+#[test]
+fn extra_positional_parameter_on_a_two_terminal_value_device_is_rejected() {
+    let error = build_error("V1 a 0 10\nR1 a 0 1000 2000\n");
+    assert_eq!(
+        error.to_string(),
+        "line 2: device 'R1' unexpected extra parameter '2000' (device R takes exactly one value)"
+    );
+}
+
+#[test]
+fn device_field_check_is_case_insensitive_and_accepts_the_known_key() {
+    // `IC=` and `ic=` are the same field, and neither is an error on a capacitor.
+    for source in [
+        "C1 b 0 1e-6 IC=5\nR1 a b 1\nV1 a 0 1",
+        "C1 b 0 1e-6 ic=5\nR1 a b 1\nV1 a 0 1",
+    ] {
+        MnaBuilder::new(Dialect::Ngspice)
+            .build_fragment(source)
+            .unwrap();
+    }
+}
+
+#[test]
+fn unstamped_devices_keep_their_own_parameter_syntax() {
+    // An `M` card's `L=1u W=10u` is valid netlist text this crate simply has no model for.
+    // Field-checking it would turn `IgnoreWithWarning` into a hard error, which is not this
+    // change's business -- only devices with a stamp are held to a known parameter grammar.
+    let options = BuildOptions {
+        unsupported_elements: general_mna::UnsupportedElementPolicy::IgnoreWithWarning,
+        ..BuildOptions::default()
+    };
+    let system = MnaBuilder::with_options(Dialect::Ngspice, options)
+        .build_fragment("V1 d 0 5\nR1 d 0 1k\nM1 d g s b NMOS L=1u W=10u\n")
+        .unwrap();
+    assert_eq!(system.warnings.len(), 1);
+}
+
+#[test]
+fn existing_source_syntax_still_parses() {
+    // Positional `DC`/`AC`/transient-function tokens on V/I, a model name on D, and a
+    // controlling-source name on F are all open positional grammars that must keep working.
+    for source in [
+        "V1 1 0 DC 10\nR1 1 0 1k",
+        "V1 1 0 SIN(0 10 1000 0 0 0)\nR1 1 0 1k",
+        "F1 2 0 Vsense 2\nR1 2 0 1k\nVsense 1 0 1",
+        "L1 1 0 4\nL2 2 0 9\nK1 L1 L2 0.5",
+    ] {
+        MnaBuilder::new(Dialect::Ngspice)
+            .build_fragment(source)
+            .unwrap_or_else(|e| panic!("{source:?} should still parse, got {e}"));
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// ic= initial conditions (general-mna#3)
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn no_ic_means_no_initial_state_at_all() {
+    // Ok(None), not an all-zero vector: a caller keeps its own "start from rest" default.
+    let system = MnaBuilder::new(Dialect::Ngspice)
+        .build_fragment("V1 a 0 10\nR1 a b 1000\nC1 b 0 1e-6")
+        .unwrap();
+    assert!(system.initial_conditions.is_empty());
+    assert_eq!(
+        system
+            .initial_state(
+                &BTreeMap::new(),
+                general_mna::DEFAULT_INITIAL_STATE_TOLERANCE
+            )
+            .unwrap(),
+        None
+    );
+}
+
+#[test]
+fn capacitor_ic_holds_its_voltage_and_the_rest_of_the_circuit_follows() {
+    // Hand-derived: C1 is a 5 V source to ground at t = 0, so V(b) = 5 and V(a) = 10 (V1 is
+    // ideal). R1 then carries (10 - 5)/1000 = 5 mA from a to b, which V1 must supply, and a
+    // voltage source's branch unknown is the current leaving its first node, so I(V1) = -5 mA.
+    let system = MnaBuilder::new(Dialect::Ngspice)
+        .build_fragment("V1 a 0 10\nR1 a b 1000\nC1 b 0 1e-6 ic=5")
+        .unwrap();
+    assert_eq!(system.initial_conditions.len(), 1);
+    let x = system
+        .initial_state(
+            &BTreeMap::new(),
+            general_mna::DEFAULT_INITIAL_STATE_TOLERANCE,
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(x.len(), system.order());
+    assert!((x[index(&system, "V(b)")] - 5.0).abs() < 1e-12);
+    assert!((x[index(&system, "V(a)")] - 10.0).abs() < 1e-12);
+    assert!((x[index(&system, "I(V1)")] + 5e-3).abs() < 1e-12);
+}
+
+#[test]
+fn capacitor_ic_is_first_node_minus_second_node() {
+    // Same capacitor, written the other way round: ic is V(first) - V(second), so V(b) = -5.
+    let system = MnaBuilder::new(Dialect::Ngspice)
+        .build_fragment("V1 a 0 10\nR1 a b 1000\nC1 0 b 1e-6 ic=5")
+        .unwrap();
+    let x = system
+        .initial_state(
+            &BTreeMap::new(),
+            general_mna::DEFAULT_INITIAL_STATE_TOLERANCE,
+        )
+        .unwrap()
+        .unwrap();
+    assert!((x[index(&system, "V(b)")] + 5.0).abs() < 1e-12);
+}
+
+#[test]
+fn capacitor_ic_works_between_two_floating_nodes() {
+    // The case a bare assignment cannot express: neither terminal is ground, so only the
+    // *difference* is declared and the constrained operating point has to settle the rest.
+    // R1 (a->b) and R2 (c->0) are 1 k each and carry the same current i; V(b) - V(c) = 5 is
+    // held by C1, so 10 - 1000i - 5 - 1000i = 0 => i = 2.5 mA, V(b) = 7.5, V(c) = 2.5.
+    let system = MnaBuilder::new(Dialect::Ngspice)
+        .build_fragment("V1 a 0 10\nR1 a b 1000\nC1 b c 1e-6 ic=5\nR2 c 0 1000")
+        .unwrap();
+    let x = system
+        .initial_state(
+            &BTreeMap::new(),
+            general_mna::DEFAULT_INITIAL_STATE_TOLERANCE,
+        )
+        .unwrap()
+        .unwrap();
+    assert!((x[index(&system, "V(b)")] - 7.5).abs() < 1e-12);
+    assert!((x[index(&system, "V(c)")] - 2.5).abs() < 1e-12);
+}
+
+#[test]
+fn inductor_ic_is_the_current_from_the_first_node_to_the_second() {
+    // The sign convention people get wrong, pinned down. `L1 a b ... ic=12` puts 12 A into a
+    // and out of b, which is exactly the sign of the system's own I(L1) unknown. The 12 A
+    // must come from V1, so I(V1) = -12; and R1 (b->0) carries it, so V(b) = 12 * 10 = 120.
+    let system = MnaBuilder::new(Dialect::Ngspice)
+        .build_fragment("V1 a 0 10\nL1 a b 5e-6 ic=12\nR1 b 0 10")
+        .unwrap();
+    let x = system
+        .initial_state(
+            &BTreeMap::new(),
+            general_mna::DEFAULT_INITIAL_STATE_TOLERANCE,
+        )
+        .unwrap()
+        .unwrap();
+    assert!((x[index(&system, "I(L1)")] - 12.0).abs() < 1e-12);
+    assert!((x[index(&system, "I(V1)")] + 12.0).abs() < 1e-12);
+    assert!((x[index(&system, "V(b)")] - 120.0).abs() < 1e-12);
+    assert!((x[index(&system, "V(a)")] - 10.0).abs() < 1e-12);
+}
+
+#[test]
+fn reversing_an_inductor_reverses_the_declared_current() {
+    let system = MnaBuilder::new(Dialect::Ngspice)
+        .build_fragment("V1 a 0 10\nL1 b a 5e-6 ic=12\nR1 b 0 10")
+        .unwrap();
+    let x = system
+        .initial_state(
+            &BTreeMap::new(),
+            general_mna::DEFAULT_INITIAL_STATE_TOLERANCE,
+        )
+        .unwrap()
+        .unwrap();
+    // I(L1) is still +12 (it is the b -> a current now), so the physical current through R1
+    // reverses: 12 A now flow out of node b into the inductor, so V(b) = -120.
+    assert!((x[index(&system, "I(L1)")] - 12.0).abs() < 1e-12);
+    assert!((x[index(&system, "V(b)")] + 120.0).abs() < 1e-12);
+}
+
+#[test]
+fn ic_free_storage_is_open_or_short_at_the_ic_operating_point() {
+    // C2 has no ic, so it is an open circuit at t = 0 and draws nothing: V(c) = V(b) = 5,
+    // unchanged from the single-capacitor case above.
+    let system = MnaBuilder::new(Dialect::Ngspice)
+        .build_fragment("V1 a 0 10\nR1 a b 1000\nC1 b 0 1e-6 ic=5\nC2 b c 1e-6\n R2 c 0 1000")
+        .unwrap();
+    let x = system
+        .initial_state(
+            &BTreeMap::new(),
+            general_mna::DEFAULT_INITIAL_STATE_TOLERANCE,
+        )
+        .unwrap()
+        .unwrap();
+    assert!((x[index(&system, "V(b)")] - 5.0).abs() < 1e-12);
+    assert!(x[index(&system, "V(c)")].abs() < 1e-12);
+}
+
+#[test]
+fn an_ic_can_be_a_symbol_resolved_at_evaluation_time() {
+    let system = MnaBuilder::new(Dialect::Ngspice)
+        .build_fragment("V1 a 0 10\nR1 a b 1000\nC1 b 0 1e-6 ic=Vc0")
+        .unwrap();
+    let x = system
+        .initial_state(
+            &BTreeMap::from([("Vc0".to_string(), 3.0)]),
+            general_mna::DEFAULT_INITIAL_STATE_TOLERANCE,
+        )
+        .unwrap()
+        .unwrap();
+    assert!((x[index(&system, "V(b)")] - 3.0).abs() < 1e-12);
+}
+
+#[test]
+fn contradictory_ic_has_no_unique_operating_point() {
+    // C1 sits directly across an ideal voltage source, which already fixes its voltage, so the
+    // constrained system is inconsistent rather than merely over-determined.
+    let system = MnaBuilder::new(Dialect::Ngspice)
+        .build_fragment("V1 a 0 10\nR1 a 0 1000\nC1 a 0 1e-6 ic=5")
+        .unwrap();
+    let error = system
+        .initial_state(
+            &BTreeMap::new(),
+            general_mna::DEFAULT_INITIAL_STATE_TOLERANCE,
+        )
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .starts_with("no unique ic= operating point"),
+        "{error}"
+    );
+}

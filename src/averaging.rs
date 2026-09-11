@@ -56,6 +56,10 @@ pub fn average(phases: &[WeightedPhase<'_>]) -> Result<MnaSystem, AveragingError
         inputs: first.inputs.clone(),
         input_values: first.input_values.clone(),
         transient_sources,
+        // An averaged system describes a duty-weighted *steady-state* model, not one particular
+        // run from one particular starting point, so a phase netlist's `ic=` values have no
+        // meaning here and are deliberately dropped rather than carried through.
+        initial_conditions: Vec::new(),
         parameter_defaults,
         warnings,
     })

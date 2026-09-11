@@ -35,6 +35,11 @@ modified or imported by this repository.
   potentially different ones every call. See
   `NumericMnaSystem::input_values`/`::u` below.
 - Mutual inductance with the SPICE relation `M = k*sqrt(L1*L2)`.
+- `ic=` initial conditions on `C` and `L`, turned into a consistent starting state by
+  `MnaSystem::initial_state` — see [Initial conditions](#initial-conditions-ic) below.
+- Trailing parameters on a stamped device card are checked, not discarded: an unrecognized
+  `key=value`, or a stray extra value on an `R`/`C`/`L`, is a build error naming the line and
+  the device, in the same shape as the block (`kind=...`) parser's own diagnostics.
 - Case-insensitive node, element, and controlling-source lookup.
 - SPICE numeric suffixes (`k`, `meg`, `m`, `u`, `n`, `p`, and others).
 - Explicit errors for devices with no linear-or-externally-parameterized
@@ -52,6 +57,53 @@ Full nonlinear semiconductor device physics, subcircuit flattening,
 behavioral sources, and symbolic Schur-complement reduction are intentionally
 future work. The builder reports devices with no stamp at all instead of
 producing an incomplete matrix.
+
+### Initial conditions (`ic=`)
+
+A storage element may declare the state it starts a transient run in:
+
+```text
+C1 b 0 1e-6 ic=5      * 5 V across the capacitor at t = 0
+L1 a b 5e-6 ic=12     * 12 A through the inductor at t = 0
+```
+
+`MnaBuilder` collects these into `MnaSystem::initial_conditions` without touching `A`/`K`/`B`/`u`
+— an initial condition constrains `x` at one instant, it does not change the circuit's
+equations. `MnaSystem::initial_state(values, tolerance)` turns them into a starting `x` in
+`unknowns` order, returning `None` (not an all-zero vector) for a netlist that declares none, so
+a caller keeps its own "start from rest" default untouched.
+
+#### Sign conventions
+
+**A capacitor's `ic` is the first node's voltage minus the second's.** `C1 b 0 1e-6 ic=5` means
+`V(b) - V(0) = 5 V`; writing `C1 0 b 1e-6 ic=5` declares `-5 V` on node `b` instead.
+
+**An inductor's `ic` is the current flowing from its first node to its second node, through the
+inductor.** `L1 a b 5e-6 ic=12` puts 12 A into terminal `a` and out of terminal `b`. This is
+exactly the sign of the system's own `I(L1)` unknown, because a branch device's incidence stamp
+puts `+1` in its first node's KCL row — a positive branch current leaves that node and enters
+the element. Writing `L1 b a 5e-6 ic=12` therefore declares the *opposite* physical current,
+which is the mistake worth checking for first when an inductor starts a run backwards.
+
+#### It is a solve, not an assignment
+
+The remaining unknowns are not free — KCL still has to hold, and a source still has to supply
+whatever the constrained state draws — so `initial_state` solves the textbook constrained
+operating point at `t = 0`:
+
+| At `t = 0` | becomes |
+|---|---|
+| capacitor **with** `ic` | an ideal voltage source of that value |
+| capacitor **without** `ic` | an open circuit |
+| inductor **with** `ic` | an ideal current source of that value |
+| inductor **without** `ic` | a short circuit |
+
+Each `ic`-bearing capacitor needs one auxiliary branch-current unknown; those are appended after
+every existing unknown and dropped from the result, so the `unknowns` ordering — a public
+contract of this crate — does not move, and a capacitor floating between two non-ground nodes
+works like any other. An `ic` that contradicts the circuit (one forced directly across an ideal
+voltage source, say), or a node left with no DC path once the table above is applied, is
+reported as `InitialStateError::Singular` rather than silently producing a meaningless vector.
 
 ### Numeric evaluation of source values (`NumericMnaSystem`)
 

@@ -92,7 +92,10 @@ pub fn build_system(source: &str, dialect: Dialect) -> Result<System, String> {
 
     let mna = MnaBuilder::new(dialect)
         .build_statements(&statements)
-        .map_err(|e| format!("{e:?}"))?;
+        // `Display`, not `Debug`: every `BuildError` variant formats itself as a readable
+        // sentence (and `InvalidElementField` as a `line N: device '<name>' ...` diagnostic
+        // matching this module's own block-field errors), which a struct dump would bury.
+        .map_err(|e| e.to_string())?;
 
     let mut ideal_diodes = BTreeMap::new();
     let mut ideal_switches = BTreeMap::new();
