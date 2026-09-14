@@ -608,11 +608,6 @@ pub enum BlockKind {
     /// ```text
     /// PID1 kind=pid in=ERR kp=1 ki=0 kd=0 n=1 clamp_lo=-1 clamp_hi=1
     /// ```
-    ///
-    /// ## References
-    /// - K. J. Åström, T. Hägglund, *PID Controllers: Theory, Design, and Tuning*, 2nd ed.,
-    ///   Instrument Society of America, 1995 — filtered-derivative form and anti-windup by
-    ///   conditional integration.
     Pid {
         /// The compiled PID gains/state.
         pid: Pid,
