@@ -55,11 +55,18 @@ modified or imported by this repository.
 - A string DTO that maps directly to Python dictionaries, JSON objects, or
   TypeScript interfaces without committing the core crate to one binding
   framework.
+- `.subckt`/`X`-instance hierarchy (`src/hierarchy.rs`), expanded into one flat statement list
+  before either builder sees it: dotted-path-renamed devices/blocks (`X1.R1`, `X1.X2.C3`, so
+  repeated instances never collide), and a `.subckt`'s port list carries signal-domain bindings
+  as freely as electrical nodes — an internal block's `in=` field bound to an external caller's
+  signal, or an internal block whose own name *is* the declared port becoming externally
+  addressable under the caller's binding, both fall out of the same node/name substitution with
+  no extra machinery. `parse_and_flatten` is the one entry point that runs this before either
+  builder.
 
-Full nonlinear semiconductor device physics, subcircuit flattening,
-behavioral sources, and symbolic Schur-complement reduction are intentionally
-future work. The builder reports devices with no stamp at all instead of
-producing an incomplete matrix.
+Full nonlinear semiconductor device physics, behavioral sources, and symbolic (as opposed to
+numeric) Schur-complement reduction are intentionally future work. The builder reports devices
+with no stamp at all instead of producing an incomplete matrix.
 
 ### Initial conditions (`ic=`)
 
