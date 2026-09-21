@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 
 use continuous_blocks::{
     CoordinateTransform, DiscreteIntegrationMethod, DiscretePid, FlipFlopKind, Hysteresis,
-    LatchPriority, LogicOp, Pid, StateSpace, TransferFunction, Vco,
+    LatchPriority, LogicOp, Pid, SettledStateError, StateSpace, TransferFunction, Vco,
 };
 use general_spice_core::ast::Statement;
 use general_spice_core::dialect::Dialect;
@@ -638,11 +638,13 @@ fn build_kind(stmt: &general_spice_core::ast::BlockInstance) -> Result<Kind, Str
                 line_number,
             )?),
             inputs: Vec::new(),
+            ic: None,
         }),
         "time" => Kind::Block(BlockInstance {
             name: name.to_string(),
             kind: BlockKind::Time,
             inputs: Vec::new(),
+            ic: None,
         }),
         // "repeat=true" is optional on both "pwc" and "pwl" (default false, unchanged
         // hold-flat-past-the-end behavior) -- wraps time into the breakpoint list's own
@@ -659,6 +661,7 @@ fn build_kind(stmt: &general_spice_core::ast::BlockInstance) -> Result<Kind, Str
                 name: name.to_string(),
                 kind: BlockKind::Pwc { points, repeat },
                 inputs: Vec::new(),
+                ic: None,
             })
         }
         "pwl" => {
@@ -668,6 +671,7 @@ fn build_kind(stmt: &general_spice_core::ast::BlockInstance) -> Result<Kind, Str
                 name: name.to_string(),
                 kind: BlockKind::Pwl { points, repeat },
                 inputs: Vec::new(),
+                ic: None,
             })
         }
         // "sinwave"/"pulsewave"/"expwave"/"sffmwave": the electrical domain's other four
@@ -699,6 +703,7 @@ fn build_kind(stmt: &general_spice_core::ast::BlockInstance) -> Result<Kind, Str
                     phase: get_opt("phase", 0.0),
                 }),
                 inputs: Vec::new(),
+                ic: None,
             })
         }
         "pulsewave" => {
@@ -720,6 +725,7 @@ fn build_kind(stmt: &general_spice_core::ast::BlockInstance) -> Result<Kind, Str
                     per: get_opt("per", f64::MAX / 4.0),
                 }),
                 inputs: Vec::new(),
+                ic: None,
             })
         }
         "expwave" => {
@@ -746,6 +752,7 @@ fn build_kind(stmt: &general_spice_core::ast::BlockInstance) -> Result<Kind, Str
                     tau2: get_opt("tau2", 1.0),
                 }),
                 inputs: Vec::new(),
+                ic: None,
             })
         }
         "sffmwave" => {
@@ -765,6 +772,7 @@ fn build_kind(stmt: &general_spice_core::ast::BlockInstance) -> Result<Kind, Str
                     fs: get("fs")?,
                 }),
                 inputs: Vec::new(),
+                ic: None,
             })
         }
         "sum" => {
@@ -794,12 +802,14 @@ fn build_kind(stmt: &general_spice_core::ast::BlockInstance) -> Result<Kind, Str
                 name: name.to_string(),
                 kind: BlockKind::Sum(signs),
                 inputs,
+                ic: None,
             })
         }
         "gain" => Kind::Block(BlockInstance {
             name: name.to_string(),
             kind: BlockKind::Gain(parse_gain_value(&get_str("k")?, name, "k", line_number)?),
             inputs: vec![parse_signal(&get_str("in")?)],
+            ic: None,
         }),
         "pid" => {
             let pid = Pid::new(get("kp")?, get("ki")?, get("kd")?, get("n")?).map_err(|e| {
@@ -831,6 +841,7 @@ fn build_kind(stmt: &general_spice_core::ast::BlockInstance) -> Result<Kind, Str
                 name: name.to_string(),
                 kind: BlockKind::Pid { pid, clamp },
                 inputs,
+                ic: None,
             })
         }
         "vco" => {
@@ -844,6 +855,7 @@ fn build_kind(stmt: &general_spice_core::ast::BlockInstance) -> Result<Kind, Str
                 name: name.to_string(),
                 kind: BlockKind::Vco(vco),
                 inputs: vec![parse_signal(&get_str("in")?)],
+                ic: None,
             })
         }
         // "pwm"/"pspwm": fixed-frequency and frequency+phase+duty active-high-complementary
@@ -895,6 +907,7 @@ fn build_kind(stmt: &general_spice_core::ast::BlockInstance) -> Result<Kind, Str
                     output_names,
                 },
                 inputs: vec![parse_signal(&get_str("in")?)],
+                ic: None,
             })
         }
         "pspwm" => {
@@ -950,6 +963,7 @@ fn build_kind(stmt: &general_spice_core::ast::BlockInstance) -> Result<Kind, Str
                     output_names,
                 },
                 inputs,
+                ic: None,
             })
         }
         "hysteresis" => {
@@ -963,6 +977,7 @@ fn build_kind(stmt: &general_spice_core::ast::BlockInstance) -> Result<Kind, Str
                 name: name.to_string(),
                 kind: BlockKind::Hysteresis(hysteresis),
                 inputs: vec![parse_signal(&get_str("in")?)],
+                ic: None,
             })
         }
         "srlatch" => {
@@ -983,6 +998,7 @@ fn build_kind(stmt: &general_spice_core::ast::BlockInstance) -> Result<Kind, Str
                     parse_signal(&get_str("set")?),
                     parse_signal(&get_str("reset")?),
                 ],
+                ic: None,
             })
         }
         "counter" => {
@@ -1012,6 +1028,7 @@ fn build_kind(stmt: &general_spice_core::ast::BlockInstance) -> Result<Kind, Str
                     reset,
                 },
                 inputs,
+                ic: None,
             })
         }
         "cscript" => {
@@ -1044,6 +1061,7 @@ fn build_kind(stmt: &general_spice_core::ast::BlockInstance) -> Result<Kind, Str
                     xc_count,
                 },
                 inputs,
+                ic: None,
             })
         }
         "pyblock" => {
@@ -1079,6 +1097,7 @@ fn build_kind(stmt: &general_spice_core::ast::BlockInstance) -> Result<Kind, Str
                     xc_count,
                 },
                 inputs,
+                ic: None,
             })
         }
         "pyfunc" => {
@@ -1106,6 +1125,7 @@ fn build_kind(stmt: &general_spice_core::ast::BlockInstance) -> Result<Kind, Str
                     sample_time,
                 },
                 inputs,
+                ic: None,
             })
         }
         "octfunc" => {
@@ -1133,6 +1153,7 @@ fn build_kind(stmt: &general_spice_core::ast::BlockInstance) -> Result<Kind, Str
                     sample_time,
                 },
                 inputs,
+                ic: None,
             })
         }
         "octblock" => {
@@ -1172,6 +1193,7 @@ fn build_kind(stmt: &general_spice_core::ast::BlockInstance) -> Result<Kind, Str
                     xc_count,
                 },
                 inputs,
+                ic: None,
             })
         }
         "statespace" => {
@@ -1240,6 +1262,7 @@ fn build_kind(stmt: &general_spice_core::ast::BlockInstance) -> Result<Kind, Str
                 name: name.to_string(),
                 kind: BlockKind::StateSpace(ss),
                 inputs,
+                ic: None,
             })
         }
         "tf" => {
@@ -1255,6 +1278,7 @@ fn build_kind(stmt: &general_spice_core::ast::BlockInstance) -> Result<Kind, Str
                 name: name.to_string(),
                 kind: BlockKind::TransferFunction(tf),
                 inputs: vec![parse_signal(&get_str("in")?)],
+                ic: None,
             })
         }
         "discretestatespace" => {
@@ -1303,6 +1327,7 @@ fn build_kind(stmt: &general_spice_core::ast::BlockInstance) -> Result<Kind, Str
                 name: name.to_string(),
                 kind: BlockKind::DiscreteStateSpace { ss, sample_time },
                 inputs,
+                ic: None,
             })
         }
         "discretetf" => {
@@ -1319,6 +1344,7 @@ fn build_kind(stmt: &general_spice_core::ast::BlockInstance) -> Result<Kind, Str
                 name: name.to_string(),
                 kind: BlockKind::DiscreteTransferFunction { tf, sample_time },
                 inputs: vec![parse_signal(&get_str("in")?)],
+                ic: None,
             })
         }
         "discretepid" => {
@@ -1375,17 +1401,20 @@ fn build_kind(stmt: &general_spice_core::ast::BlockInstance) -> Result<Kind, Str
                     sample_time,
                 },
                 inputs,
+                ic: None,
             })
         }
         "product" => Kind::Block(BlockInstance {
             name: name.to_string(),
             kind: BlockKind::Product,
             inputs: get_str("inputs")?.split(',').map(parse_signal).collect(),
+            ic: None,
         }),
         "saturation" => Kind::Block(BlockInstance {
             name: name.to_string(),
             kind: BlockKind::Saturation(get("limit")?),
             inputs: vec![parse_signal(&get_str("in")?)],
+            ic: None,
         }),
         "table" => {
             let points = parse_xy_points(&get_str("points")?, name, "points", line_number)?;
@@ -1393,6 +1422,7 @@ fn build_kind(stmt: &general_spice_core::ast::BlockInstance) -> Result<Kind, Str
                 name: name.to_string(),
                 kind: BlockKind::Table(points),
                 inputs: vec![parse_signal(&get_str("in")?)],
+                ic: None,
             })
         }
         "phys2sig" => {
@@ -1419,6 +1449,7 @@ fn build_kind(stmt: &general_spice_core::ast::BlockInstance) -> Result<Kind, Str
                 name: name.to_string(),
                 kind: BlockKind::Phys2Sig(target),
                 inputs: Vec::new(),
+                ic: None,
             })
         }
         "sig2phys" => {
@@ -1437,6 +1468,7 @@ fn build_kind(stmt: &general_spice_core::ast::BlockInstance) -> Result<Kind, Str
                 name: name.to_string(),
                 kind: BlockKind::Sig2Phys { domain },
                 inputs: vec![parse_signal(&get_str("in")?)],
+                ic: None,
             })
         }
         "clarke" | "clarkeinv" | "park" | "parkinv" | "clarkepark" | "clarkeparkinv" => {
@@ -1488,6 +1520,7 @@ fn build_kind(stmt: &general_spice_core::ast::BlockInstance) -> Result<Kind, Str
                     output_names,
                 },
                 inputs,
+                ic: None,
             })
         }
         "pmsm" => {
@@ -1542,6 +1575,7 @@ fn build_kind(stmt: &general_spice_core::ast::BlockInstance) -> Result<Kind, Str
                 name: name.to_string(),
                 kind: BlockKind::Pmsm { pmsm, output_names },
                 inputs,
+                ic: None,
             })
         }
         other => {
@@ -1553,6 +1587,7 @@ fn build_kind(stmt: &general_spice_core::ast::BlockInstance) -> Result<Kind, Str
                     name: name.to_string(),
                     kind: BlockKind::MathFn1(f),
                     inputs: vec![parse_signal(&get_str("in")?)],
+                    ic: None,
                 })
             } else if let Some(f) = continuous_blocks::MathFn2::from_name(other) {
                 Kind::Block(BlockInstance {
@@ -1562,6 +1597,7 @@ fn build_kind(stmt: &general_spice_core::ast::BlockInstance) -> Result<Kind, Str
                         parse_signal(&get_str("in1")?),
                         parse_signal(&get_str("in2")?),
                     ],
+                    ic: None,
                 })
             } else if let Some(f) = continuous_blocks::MathFn3::from_name(other) {
                 Kind::Block(BlockInstance {
@@ -1572,6 +1608,7 @@ fn build_kind(stmt: &general_spice_core::ast::BlockInstance) -> Result<Kind, Str
                         parse_signal(&get_str("in2")?),
                         parse_signal(&get_str("in3")?),
                     ],
+                    ic: None,
                 })
             } else if let Some(op) = LogicOp::from_name(other) {
                 let inputs = if op.is_unary() {
@@ -1593,6 +1630,7 @@ fn build_kind(stmt: &general_spice_core::ast::BlockInstance) -> Result<Kind, Str
                     name: name.to_string(),
                     kind: BlockKind::LogicGate(op),
                     inputs,
+                    ic: None,
                 })
             } else if let Some(kind) = FlipFlopKind::from_name(other) {
                 let mut inputs = vec![parse_signal(&get_str("clk")?)];
@@ -1612,6 +1650,7 @@ fn build_kind(stmt: &general_spice_core::ast::BlockInstance) -> Result<Kind, Str
                     name: name.to_string(),
                     kind: BlockKind::FlipFlop { kind, reset },
                     inputs,
+                    ic: None,
                 })
             } else {
                 return Err(format!(
@@ -1622,5 +1661,190 @@ fn build_kind(stmt: &general_spice_core::ast::BlockInstance) -> Result<Kind, Str
         }
     };
 
-    Ok(entry)
+    match entry {
+        Kind::Block(mut block) => {
+            block.ic = parse_block_initial_condition(&block.kind, &fields, name, line_number)?;
+            Ok(Kind::Block(block))
+        }
+        other => Ok(other),
+    }
+}
+
+/// Resolves a block's `ic=` (and, for `kind=tf`/`kind=discretetf`, `y0=`) into
+/// [`BlockInstance::ic`]'s already-validated state vector — see that field's own doc comment
+/// for the per-kind layout. Runs once, after the block's own `kind=` arm has built it, so every
+/// check below has the finished block (its state count, its `ki`, its `modulus`) to check
+/// against, and so no individual arm has to know initial conditions exist.
+///
+/// An `ic=` on a kind with no state of its own to start is rejected rather than dropped: a
+/// silently ignored initial condition is a run that starts somewhere other than where its
+/// author believes, with nothing in the output to say so.
+fn parse_block_initial_condition(
+    kind: &BlockKind,
+    fields: &BTreeMap<String, String>,
+    name: &str,
+    line_number: usize,
+) -> Result<Option<Vec<f64>>, String> {
+    let line = line_number + 1;
+    let ic_text = fields.get("ic");
+    let y0_text = fields.get("y0");
+    let accepts_y0 = matches!(
+        kind,
+        BlockKind::TransferFunction(_) | BlockKind::DiscreteTransferFunction { .. }
+    );
+    if y0_text.is_some() && !accepts_y0 {
+        return Err(format!(
+            "line {line}: device '{name}' field 'y0' is only valid on kind=tf/kind=discretetf \
+             (a settled output to start from) -- use 'ic' for this kind's initial condition"
+        ));
+    }
+    if ic_text.is_some() && y0_text.is_some() {
+        return Err(format!(
+            "line {line}: device '{name}': 'ic' (the state vector) and 'y0' (the settled \
+             output) both set an initial condition -- give one or the other"
+        ));
+    }
+
+    let finite = |values: Vec<f64>| -> Result<Vec<f64>, String> {
+        match values.iter().find(|v| !v.is_finite()) {
+            Some(v) => Err(format!(
+                "line {line}: device '{name}' initial condition must be finite (got {v})"
+            )),
+            None => Ok(values),
+        }
+    };
+    // `ic=` as a state vector: a Python-style list, or a bare number for a one-state block.
+    let state_vector = |text: &str, states: usize| -> Result<Vec<f64>, String> {
+        let values = if text.trim().starts_with('[') {
+            parse_vector(text, name, "ic", line_number)?
+        } else {
+            vec![text
+                .trim()
+                .parse::<f64>()
+                .map_err(|_| format!("line {line}: device '{name}' field 'ic' is not a number"))?]
+        };
+        if values.len() != states {
+            return Err(format!(
+                "line {line}: device '{name}' field 'ic' has {} value(s), but this block has \
+                 {states} state(s)",
+                values.len()
+            ));
+        }
+        finite(values)
+    };
+    let scalar = |text: &str, key: &str| -> Result<f64, String> {
+        let v = text
+            .trim()
+            .parse::<f64>()
+            .map_err(|_| format!("line {line}: device '{name}' field '{key}' is not a number"))?;
+        finite(vec![v]).map(|v| v[0])
+    };
+    let settled = |result: Result<Vec<f64>, SettledStateError>, key: &str, what: &str| {
+        result.map_err(|e| match e {
+            SettledStateError::NoStates => format!(
+                "line {line}: device '{name}' field '{key}': this {what} has no state to \
+                 initialize (its denominator is a constant)"
+            ),
+            SettledStateError::ZeroDcNumerator => format!(
+                "line {line}: device '{name}' field '{key}': this {what}'s numerator is zero \
+                 at DC, so its settled output is always 0 and no state holds the requested one"
+            ),
+        })
+    };
+
+    let Some(ic_text) = ic_text else {
+        return match (kind, y0_text) {
+            (BlockKind::TransferFunction(tf), Some(y0)) => settled(
+                tf.settled_state(scalar(y0, "y0")?),
+                "y0",
+                "transfer function",
+            )
+            .map(Some),
+            (BlockKind::DiscreteTransferFunction { tf, .. }, Some(y0)) => settled(
+                tf.settled_state_discrete(scalar(y0, "y0")?),
+                "y0",
+                "transfer function",
+            )
+            .map(Some),
+            _ => Ok(None),
+        };
+    };
+
+    let ic = match kind {
+        BlockKind::StateSpace(ss) | BlockKind::DiscreteStateSpace { ss, .. } => {
+            state_vector(ic_text, ss.states())?
+        }
+        BlockKind::TransferFunction(tf) | BlockKind::DiscreteTransferFunction { tf, .. } => {
+            state_vector(ic_text, tf.den.len() - 1)?
+        }
+        BlockKind::Pid { pid, .. } => {
+            if pid.ki == 0.0 {
+                return Err(format!(
+                    "line {line}: device '{name}' field 'ic' pre-loads the integrator, but this \
+                     PID has ki=0 -- there is no integrator to hold it"
+                ));
+            }
+            settled(
+                pid.to_transfer_function()
+                    .settled_state(scalar(ic_text, "ic")?),
+                "ic",
+                "PID",
+            )?
+        }
+        BlockKind::DiscretePid { pid, .. } => {
+            if pid.ki == 0.0 {
+                return Err(format!(
+                    "line {line}: device '{name}' field 'ic' pre-loads the integrator, but this \
+                     PID has ki=0 -- there is no integrator to hold it"
+                ));
+            }
+            vec![scalar(ic_text, "ic")? / pid.ki]
+        }
+        BlockKind::Vco(_) | BlockKind::PhaseShiftPwm { .. } => {
+            let phase = scalar(ic_text, "ic")?;
+            if !(0.0..1.0).contains(&phase) {
+                return Err(format!(
+                    "line {line}: device '{name}' field 'ic' is the initial phase in cycles and \
+                     must satisfy 0 <= ic < 1 (got {phase})"
+                ));
+            }
+            vec![phase]
+        }
+        BlockKind::Pmsm { .. } => state_vector(ic_text, 4)?,
+        BlockKind::Hysteresis(_) | BlockKind::SrLatch { .. } | BlockKind::FlipFlop { .. } => {
+            match ic_text.trim() {
+                "0" => vec![0.0],
+                "1" => vec![1.0],
+                other => {
+                    return Err(format!(
+                        "line {line}: device '{name}' field 'ic' is the initial logic output \
+                         and must be 0 or 1 (got '{other}')"
+                    ))
+                }
+            }
+        }
+        BlockKind::Counter { modulus, .. } => {
+            let count = ic_text.trim().parse::<i64>().map_err(|_| {
+                format!("line {line}: device '{name}' field 'ic' is not an integer")
+            })?;
+            if let Some(m) = modulus {
+                if count < 0 || count >= i64::from(*m) {
+                    return Err(format!(
+                        "line {line}: device '{name}' field 'ic' must satisfy 0 <= ic < \
+                         modulus ({m}) (got {count})"
+                    ));
+                }
+            }
+            vec![count as f64]
+        }
+        _ => {
+            return Err(format!(
+                "line {line}: device '{name}' field 'ic': this kind has no state to \
+                 initialize -- 'ic' is accepted on statespace, tf, pid, discretestatespace, \
+                 discretetf, discretepid, vco, pspwm, pmsm, hysteresis, srlatch, the \
+                 flip-flops, and counter"
+            ))
+        }
+    };
+    Ok(Some(ic))
 }
