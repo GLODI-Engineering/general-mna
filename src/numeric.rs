@@ -388,7 +388,32 @@ fn check_assignment_against_circuit(
         let contributing: Vec<usize> = (0..order)
             .filter(|col| numeric.a[(row, *col)] != 0.0)
             .collect();
-        if contributing.is_empty() || !contributing.iter().all(|col| assigned[*col]) {
+        // A *state* is determined whether or not it carries an `ic`: `initial_state` starts
+        // every unknown at zero and only overwrites the ones an `ic` names, so an `ic`-free
+        // inductor current is pinned at zero, not free. Nothing re-solves it -- the integrator
+        // takes that zero as the initial current -- so a row containing it is fully determined
+        // and its residual is a real contradiction. Treating it as free is what let an
+        // inductor cut-set with an `ic` on some of its branches and not others be accepted
+        // silently, starting 134% away from the requested current.
+        //
+        // Dynamic variables are the indices whose row in `K` is nonzero, the same test
+        // `schur_complement` uses.
+        // Restricted to inductor *branch currents*, which are the states nothing re-solves. A
+        // capacitor's node voltage is also a state started at zero, but it is shared with the
+        // resistive network and the first step genuinely does re-impose it -- treating it as
+        // determined rejects `V1 a 0 400` + an `ic`-free capacitor on `a` with residual -400,
+        // which is the documented and correct behaviour, not a contradiction. Measured: that
+        // over-reach rejected 12 of 40 of this project's own committed decks.
+        //
+        // An inductor branch current is `I(...)` with storage: a voltage source's branch
+        // current is also `I(...)` but has an all-zero `K` row, and a capacitor node voltage
+        // has storage but is `V(...)`.
+        let determined = |col: usize| {
+            assigned[col]
+                || (numeric.unknowns[col].starts_with("I(")
+                    && (0..order).any(|j| numeric.k[(col, j)] != 0.0))
+        };
+        if contributing.is_empty() || !contributing.iter().all(|col| determined(*col)) {
             continue;
         }
         let mut residual = -numeric.u[row];

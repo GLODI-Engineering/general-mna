@@ -719,6 +719,49 @@ fn an_ic_across_an_ideal_voltage_source_is_reported_not_silently_overridden() {
 }
 
 #[test]
+fn an_ic_free_inductor_in_a_cut_set_is_still_determined_and_is_reported() {
+    // Three inductors at a node: KCL forces i_L1 = i_L2 + i_Lm, so the three initial currents
+    // are one constraint over-specified. LM carries no `ic`, but `initial_state` still pins it
+    // at zero and the integrator takes that zero as its initial current -- nothing re-solves it.
+    // So the row is fully determined and -1 != -0.6 + 0 is a contradiction, not a transient.
+    //
+    // Before this was fixed the row was skipped because LM's column read as "unassigned", and
+    // the deck was accepted with L1 and L2 both started at their average instead of at the two
+    // values asked for.
+    let error = ic_error(
+        "V1 a 0 10\nR1 a b 1\nL1 b x 5e-6 ic=-1\nL2 x c 5e-6 ic=-0.6\nR2 c 0 1\nLM x 0 5e-4",
+    );
+    match &error {
+        general_mna::InitialStateError::InconsistentWithCircuit {
+            constraint,
+            residual,
+        } => {
+            assert_eq!(constraint, "V(x)");
+            assert!((residual.abs() - 0.4).abs() < 1e-12, "{error}");
+        }
+        other => panic!("expected InconsistentWithCircuit, got {other:?}"),
+    }
+}
+
+#[test]
+fn an_ic_free_inductor_outside_any_cut_set_stays_free() {
+    // The complement of the test above, so it cannot pass vacuously: a lone `ic`-free inductor
+    // in series with the source shares no algebraic constraint with anything assigned, and must
+    // still be accepted rather than swept up by the stricter rule.
+    let system = MnaBuilder::new(Dialect::Ngspice)
+        .build_fragment("V1 a 0 10\nL1 a b 1e-3 ic=2\nR1 b 0 1\nL2 a c 1e-3\nR2 c 0 1")
+        .unwrap();
+    let x = system
+        .initial_state(
+            &BTreeMap::new(),
+            general_mna::DEFAULT_INITIAL_STATE_TOLERANCE,
+        )
+        .unwrap()
+        .unwrap();
+    assert!((x[index(&system, "I(L1)")] - 2.0).abs() < 1e-12);
+}
+
+#[test]
 fn series_inductors_declaring_different_currents_are_reported() {
     // KCL at the shared node already says the two currents are equal; 1 A and 2 A are not.
     let error = ic_error("V1 a 0 10\nL1 a b 1e-3 ic=1\nL2 b 0 1e-3 ic=2");
