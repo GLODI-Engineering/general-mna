@@ -370,3 +370,191 @@ fn discretepid_unknown_integration_method_is_a_clear_error() {
     let err = build_system(source, Dialect::Ngspice).unwrap_err();
     assert!(err.contains("unknown integration_method"), "got: {err}");
 }
+
+// ---- ic= / y0= on stateful blocks (#8) ----
+
+fn only_block_ic(source: &str) -> Option<Vec<f64>> {
+    let System { blocks, .. } = build_system(source, Dialect::Ngspice).unwrap();
+    blocks[0].ic.clone()
+}
+
+fn build_error(source: &str) -> String {
+    build_system(source, Dialect::Ngspice).unwrap_err()
+}
+
+#[test]
+fn a_block_without_ic_starts_from_rest() {
+    assert_eq!(
+        only_block_ic("G kind=tf in=U num=[1] den=[1,1]\nU kind=const value=1\n"),
+        None
+    );
+}
+
+#[test]
+fn statespace_ic_is_the_state_vector_and_a_scalar_is_allowed_for_one_state() {
+    assert_eq!(
+        only_block_ic(
+            "G kind=statespace in=U a=[[0,1],[-2,-3]] b=[0,1] c=[1,0] ic=[0.5,-1]\n\
+             U kind=const value=1\n"
+        ),
+        Some(vec![0.5, -1.0])
+    );
+    assert_eq!(
+        only_block_ic(
+            "G kind=discretestatespace in=U a=[[0.5]] b=[1] c=[1] ts=0.1 ic=2\n\
+             U kind=const value=1\n"
+        ),
+        Some(vec![2.0])
+    );
+}
+
+#[test]
+fn a_wrong_length_ic_is_rejected_with_the_state_count() {
+    let err = build_error(
+        "G kind=statespace in=U a=[[0,1],[-2,-3]] b=[0,1] c=[1,0] ic=[0.5]\n\
+         U kind=const value=1\n",
+    );
+    assert_eq!(
+        err,
+        "line 1: device 'G' field 'ic' has 1 value(s), but this block has 2 state(s)"
+    );
+}
+
+/// `(s+3)/(s^2+3s+2)` settled at `y0=6`: `x1 = 6/b0 = 6/3 = 2` -- the same hand-derived case
+/// `continuous-blocks` tests as a real equilibrium.
+#[test]
+fn tf_y0_resolves_to_the_settled_canonical_state() {
+    assert_eq!(
+        only_block_ic("G kind=tf in=U num=[1,3] den=[1,3,2] y0=6\nU kind=const value=4\n"),
+        Some(vec![2.0, 0.0])
+    );
+    assert_eq!(
+        only_block_ic("G kind=tf in=U num=[1,3] den=[1,3,2] ic=[1,-1]\nU kind=const value=4\n"),
+        Some(vec![1.0, -1.0])
+    );
+    // H(z) = (0.5z+0.25)/(z^2-0.5z), N(1) = 0.75: every state is 3/0.75 = 4.
+    assert_eq!(
+        only_block_ic(
+            "G kind=discretetf in=U num=[0.5,0.25] den=[1,-0.5,0] ts=0.1 y0=3\n\
+             U kind=const value=2\n"
+        ),
+        Some(vec![4.0, 4.0])
+    );
+}
+
+#[test]
+fn tf_ic_and_y0_together_or_y0_on_a_highpass_are_rejected() {
+    let err = build_error("G kind=tf in=U num=[1] den=[1,1] ic=[1] y0=1\nU kind=const value=1\n");
+    assert!(err.contains("give one or the other"), "{err}");
+    let err = build_error("G kind=tf in=U num=[1,0] den=[1,1] y0=1\nU kind=const value=1\n");
+    assert!(err.contains("numerator is zero at DC"), "{err}");
+    let err =
+        build_error("G kind=statespace in=U a=[[-1]] b=[1] c=[1] y0=1\nU kind=const value=1\n");
+    assert!(
+        err.contains("only valid on kind=tf/kind=discretetf"),
+        "{err}"
+    );
+}
+
+/// `kp=2 ki=3 kd=0 n=10`: `(2s^2+23s+30)/(s^2+10s)`, `d=2`, remainder `3s+30`, so `b0=30`,
+/// `a0=0`, and an output of `ic=0.6` at zero error is `x1 = 0.6/30 = 0.02`.
+#[test]
+fn pid_ic_is_the_held_output_at_zero_error() {
+    let ic = only_block_ic(
+        "C kind=pid in=E kp=2 ki=3 kd=0 n=10 clamp_lo=-1 clamp_hi=1 ic=0.6\n\
+         E kind=const value=0\n",
+    )
+    .unwrap();
+    assert_eq!(ic.len(), 2);
+    assert!((ic[0] - 0.02).abs() < 1e-15 && ic[1] == 0.0, "{ic:?}");
+
+    // Discrete: the integrator's accumulated value, ic / ki.
+    assert_eq!(
+        only_block_ic(
+            "C kind=discretepid in=E kp=1 ki=2 kd=0 n=1 ts=0.01 clamp_lo=-1 clamp_hi=1 ic=0.6\n\
+             E kind=const value=0\n"
+        ),
+        Some(vec![0.3])
+    );
+
+    let err = build_error(
+        "C kind=pid in=E kp=2 ki=0 kd=0 n=10 clamp_lo=-1 clamp_hi=1 ic=0.6\nE kind=const value=0\n",
+    );
+    assert!(err.contains("ki=0"), "{err}");
+}
+
+#[test]
+fn a_phase_ic_must_lie_in_the_unit_interval() {
+    assert_eq!(
+        only_block_ic("O kind=vco in=F f_min=1 f_max=10 ic=0.25\nF kind=const value=5\n"),
+        Some(vec![0.25])
+    );
+    let err = build_error("O kind=vco in=F f_min=1 f_max=10 ic=1\nF kind=const value=5\n");
+    assert!(err.contains("0 <= ic < 1 (got 1)"), "{err}");
+}
+
+#[test]
+fn logic_and_counter_ic_are_checked_against_their_own_domains() {
+    assert_eq!(
+        only_block_ic("Q kind=srlatch set=S reset=S ic=1\nS kind=const value=0\n"),
+        Some(vec![1.0])
+    );
+    assert_eq!(
+        only_block_ic("Q kind=dff clk=S d=S ic=1\nS kind=const value=0\n"),
+        Some(vec![1.0])
+    );
+    assert_eq!(
+        only_block_ic("H kind=hysteresis in=S high=1 low=0 ic=1\nS kind=const value=0\n"),
+        Some(vec![1.0])
+    );
+    let err = build_error("Q kind=srlatch set=S reset=S ic=0.5\nS kind=const value=0\n");
+    assert!(err.contains("must be 0 or 1 (got '0.5')"), "{err}");
+
+    assert_eq!(
+        only_block_ic("N kind=counter clk=S modulus=10 ic=7\nS kind=const value=0\n"),
+        Some(vec![7.0])
+    );
+    assert_eq!(
+        only_block_ic("N kind=counter clk=S ic=-3\nS kind=const value=0\n"),
+        Some(vec![-3.0])
+    );
+    let err = build_error("N kind=counter clk=S modulus=10 ic=10\nS kind=const value=0\n");
+    assert!(err.contains("0 <= ic < modulus (10) (got 10)"), "{err}");
+    let err = build_error("N kind=counter clk=S ic=1.5\nS kind=const value=0\n");
+    assert!(err.contains("is not an integer"), "{err}");
+}
+
+#[test]
+fn pmsm_ic_is_the_four_machine_states() {
+    assert_eq!(
+        only_block_ic(
+            "M kind=pmsm r_s=0.5 l_d=1e-3 l_q=1e-3 lambda_pm=0.05 pole_pairs=4 inertia=1e-5 \
+             friction=0 inputs=Z,Z,Z ic=[1,2,300,0.5]\nZ kind=const value=0\n"
+        ),
+        Some(vec![1.0, 2.0, 300.0, 0.5])
+    );
+}
+
+#[test]
+fn ic_on_a_stateless_block_is_rejected_not_dropped() {
+    let err = build_error("G kind=gain in=U k=2 ic=1\nU kind=const value=1\n");
+    assert!(
+        err.starts_with("line 1: device 'G' field 'ic': this kind has no state"),
+        "{err}"
+    );
+    let err = build_error("G kind=tf in=U num=[1] den=[1,1] ic=[inf]\nU kind=const value=1\n");
+    assert!(err.contains("finite"), "{err}");
+}
+
+/// A block declared inside a `.subckt` keeps its `ic=` through flattening.
+#[test]
+fn a_subcircuit_block_keeps_its_ic() {
+    let source = ".subckt filt in out\nR1 in out 1\nF kind=tf in=U num=[1] den=[1,1] y0=2\n\
+                  U kind=const value=1\n.ends filt\nV1 a 0 1\nX1 a b filt\nR2 b 0 1\n";
+    let System { blocks, .. } = build_system(source, Dialect::Ngspice).unwrap();
+    let f = blocks
+        .iter()
+        .find(|b| b.name.ends_with('F') || b.name.contains(".F"))
+        .unwrap();
+    assert_eq!(f.ic, Some(vec![2.0]));
+}
