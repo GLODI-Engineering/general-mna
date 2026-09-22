@@ -844,8 +844,9 @@ fn backward_euler_step(system: &general_mna::MnaSystem, x0: &[f64], dt: f64) -> 
                 continue;
             }
             let factor = m[row][pivot] / m[pivot][pivot];
-            for col in pivot..=n {
-                m[row][col] -= factor * m[pivot][col];
+            let pivot_row = m[pivot].clone();
+            for (cell, p) in m[row][pivot..=n].iter_mut().zip(&pivot_row[pivot..=n]) {
+                *cell -= factor * p;
             }
         }
     }
