@@ -29,6 +29,10 @@
 //! A block reference that resolves to a name nothing declares (not a port, not another block in
 //! the same body) still surfaces as the same `UnknownBlockInput` error it always has, just after
 //! expansion instead of before.
+//!
+//! **`.IC` inside a body**: a `.IC V(<node>)=` / `V(<n1>,<n2>)=` / `I(<element>)=` written inside
+//! a `.subckt` names that body's own nodes and elements, so each target goes through the very
+//! same resolution ([`mangle_ic_target`]) before the builder's unknown-name check sees it.
 
 use std::collections::HashMap;
 
@@ -161,6 +165,13 @@ fn expand_body(
             Statement::BlockInstance(bi) => {
                 out.push(Statement::BlockInstance(mangle_block(bi, prefix, &resolve)));
             }
+            Statement::Ic(assignments, span) => {
+                let mangled = assignments
+                    .iter()
+                    .map(|(target, value)| (mangle_ic_target(target, &resolve), value.clone()))
+                    .collect();
+                out.push(Statement::Ic(mangled, span.clone()));
+            }
             // .subckt/.ends can't appear inside a body here -- split_definitions already
             // consumed every matching pair, at every nesting depth, into `defs`.
             Statement::Subckt(_) | Statement::Ends(_, _) => unreachable!(
@@ -266,6 +277,31 @@ fn mangle_block(
         }
     }
     mangled
+}
+
+/// Resolves one `.IC` assignment target the way an element card's nodes and a `phys2sig`'s
+/// `node=`/`branch=` fields are resolved: `V(<node>)` and `V(<n1>,<n2>)` name electrical nodes
+/// (a declared port becomes the caller's connecting node, an internal node gets the dotted
+/// prefix, ground stays ground) and `I(<element>)` names an element, which gets the same
+/// dotted prefix its own card got. Without this a `.IC` inside a `.subckt` body kept its
+/// unmangled inner name after flattening and failed the builder's "no element connects to"
+/// check instead of binding (general-mna#18). Anything that is not of the `<letter>(...)` form
+/// is passed through untouched: `MnaBuilder`'s own `.IC` validation rejects it with the
+/// line-numbered message it always has, and rewriting it here would only obscure that.
+fn mangle_ic_target(target: &str, resolve: &impl Fn(&str) -> String) -> String {
+    let trimmed = target.trim();
+    let Some((kind, inner)) = trimmed
+        .strip_suffix(')')
+        .and_then(|without_close| without_close.split_once('('))
+    else {
+        return target.to_string();
+    };
+    let resolved = inner
+        .split(',')
+        .map(|name| resolve(name.trim()))
+        .collect::<Vec<_>>()
+        .join(",");
+    format!("{kind}({resolved})")
 }
 
 #[cfg(test)]
@@ -580,6 +616,44 @@ mod tests {
             .unwrap();
         let in_field = gain_block.fields.iter().find(|(k, _)| k == "in").unwrap();
         assert_eq!(in_field.1, "MEASURED");
+    }
+
+    #[test]
+    fn a_dot_ic_inside_a_subckt_body_resolves_its_targets_like_element_nodes() {
+        // general-mna#18: `.IC` targets get the same port/prefix/ground resolution as an
+        // element card's nodes -- a port binds to the caller's node, an internal node and an
+        // element name get the `X1.` prefix, ground stays ground, and a malformed target is
+        // forwarded untouched for the builder to reject with its usual message.
+        let statements = vec![
+            subckt("filt", &["in", "out"]),
+            element('L', "L1", &["in", "mid"]),
+            element('C', "C1", &["mid", "0"]),
+            element('R', "R1", &["mid", "out"]),
+            Statement::Ic(
+                vec![
+                    ("V(mid)".to_string(), "5".to_string()),
+                    ("V(out)".to_string(), "1".to_string()),
+                    ("V(mid, 0)".to_string(), "5".to_string()),
+                    ("I(L1)".to_string(), "2".to_string()),
+                    ("mid".to_string(), "5".to_string()),
+                ],
+                4..5,
+            ),
+            ends("filt"),
+            x_call("X1", &["a", "b"], "filt"),
+        ];
+        let flat = flatten(&statements).unwrap();
+        let Some(Statement::Ic(assignments, span)) = flat.last() else {
+            panic!("expected the .IC to be forwarded last");
+        };
+        assert_eq!(span, &(4..5));
+        let targets: Vec<&str> = assignments.iter().map(|(t, _)| t.as_str()).collect();
+        assert_eq!(
+            targets,
+            vec!["V(X1.mid)", "V(b)", "V(X1.mid,0)", "I(X1.L1)", "mid"]
+        );
+        let values: Vec<&str> = assignments.iter().map(|(_, v)| v.as_str()).collect();
+        assert_eq!(values, vec!["5", "1", "5", "2", "5"]);
     }
 
     #[test]

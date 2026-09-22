@@ -247,10 +247,11 @@ impl MnaBuilder {
 
         let mut warnings = Vec::new();
 
-        // `.IC V(node)=value` / `.IC I(inductor)=value` lines. `general-spice-core` parses the
-        // directive into `Statement::Ic`; until now nothing here read it, so a deck's `.IC`
-        // line was accepted and its run started from rest anyway -- the one outcome an initial
-        // condition must never have. Each assignment becomes the very same
+        // `.IC V(node)=value` / `.IC I(inductor)=value` lines (already dotted-path-resolved by
+        // `hierarchy::flatten` when written inside a `.subckt` body). `general-spice-core`
+        // parses the directive into `Statement::Ic`; until now nothing here read it, so a
+        // deck's `.IC` line was accepted and its run started from rest anyway -- the one
+        // outcome an initial condition must never have. Each assignment becomes the very same
         // `InitialCondition` an `ic=` field produces (a node voltage is a "capacitor voltage"
         // whose second terminal is ground), so `MnaSystem::initial_state` applies it, and
         // checks it against every `ic=`, with no separate code path. `.NODESET` is a hint to
@@ -1039,6 +1040,11 @@ fn accepted_suffix(accepted: &'static [&'static str]) -> String {
 /// Every value flows into `MnaSystem::initial_state` exactly like an `ic=`, so a `.IC V(b)=5`
 /// next to `C1 b 0 1e-6 ic=4` is reported by the same `ConflictingConditions` check as two
 /// disagreeing `ic=` capacitors, not resolved in favour of whichever came last.
+///
+/// Targets arrive here already flat: a `.IC` written inside a `.subckt` body has had its node
+/// and element names resolved by `hierarchy::flatten` (port -> caller's node, internal name ->
+/// `X1.`-prefixed, ground unchanged) before `build_statements` runs, so the unknown index is
+/// the only namespace this function ever looks names up in.
 fn dot_ic_condition(
     target: &str,
     raw_value: &str,
