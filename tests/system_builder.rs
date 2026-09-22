@@ -627,3 +627,22 @@ fn escape_hatch_blocks_accept_their_whole_optional_field_set() {
         "{err}"
     );
 }
+
+/// A `.IC` line reaches the electrical system through the unified builder too (the
+/// flattening pass forwards it untouched), so a full deck starts where its author said.
+#[test]
+fn a_dot_ic_directive_reaches_the_mna_system_through_build_system() {
+    let source = "V1 a 0 10\nR1 a b 1000\nC1 b 0 1e-6\n.IC V(b)=5\nG kind=gain in=U k=2\n\
+                  U kind=const value=1\n";
+    let System { mna, .. } = build_system(source, Dialect::Ngspice).unwrap();
+    assert_eq!(mna.initial_conditions.len(), 1);
+    let x = mna
+        .initial_state(
+            &std::collections::BTreeMap::new(),
+            general_mna::DEFAULT_INITIAL_STATE_TOLERANCE,
+        )
+        .unwrap()
+        .unwrap();
+    let vb = mna.unknowns.iter().position(|u| u == "V(b)").unwrap();
+    assert!((x[vb] - 5.0).abs() < 1e-12);
+}

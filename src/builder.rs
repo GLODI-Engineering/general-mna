@@ -245,11 +245,42 @@ impl MnaBuilder {
             }
         }
 
+        let mut warnings = Vec::new();
+
+        // `.IC V(node)=value` / `.IC I(inductor)=value` lines. `general-spice-core` parses the
+        // directive into `Statement::Ic`; until now nothing here read it, so a deck's `.IC`
+        // line was accepted and its run started from rest anyway -- the one outcome an initial
+        // condition must never have. Each assignment becomes the very same
+        // `InitialCondition` an `ic=` field produces (a node voltage is a "capacitor voltage"
+        // whose second terminal is ground), so `MnaSystem::initial_state` applies it, and
+        // checks it against every `ic=`, with no separate code path. `.NODESET` is a hint to
+        // an operating-point solve this crate does not perform, so it is reported as a
+        // warning rather than dropped without a trace.
+        for statement in statements {
+            match statement {
+                Statement::Ic(assignments, span) => {
+                    for (target, raw) in assignments {
+                        initial_conditions.push(dot_ic_condition(
+                            target, raw, span.start, &elements, &index,
+                        )?);
+                    }
+                }
+                Statement::Nodeset(_, span) | Statement::NodesetAll(_, span) => {
+                    warnings.push(format!(
+                        "line {}: .NODESET is a hint for a DC operating-point solve, which \
+                         this crate does not perform -- it has no effect here; use .IC or ic= \
+                         to declare a starting state",
+                        span.start
+                    ));
+                }
+                _ => {}
+            }
+        }
+
         let order = index.names.len();
         let mut a = Matrix::filled(order, order, Expression::zero());
         let mut k = Matrix::filled(order, order, Expression::zero());
         let mut b = Matrix::filled(order, inputs.len(), Expression::zero());
-        let mut warnings = Vec::new();
 
         let inductances = elements
             .iter()
@@ -995,6 +1026,107 @@ fn accepted_suffix(accepted: &'static [&'static str]) -> String {
 /// The raw text of a device card's `ic=` field, if it declares one. Already validated as an
 /// accepted key by [`validate_trailing_fields`], so reaching this on anything but `C`/`L` is a
 /// bug, not bad input.
+/// Resolves one `.IC` assignment into the [`InitialCondition`] an `ic=` field would have
+/// produced, against the finished unknown index.
+///
+/// Accepted targets, case-insensitively: `V(<node>)`, the node's voltage above ground (a
+/// [`InitialCondition::CapacitorVoltage`] with a ground second terminal); `V(<n1>,<n2>)`, the
+/// difference `V(n1) - V(n2)` (both terminals as written); `I(<inductor>)`, the current through
+/// that inductor from its first node to its second, the same sign as `ic=` on the card itself.
+/// `I(...)` of anything but an inductor (a voltage source has a branch current too, but no state
+/// to start) is rejected: an initial *state* is what `.IC` declares.
+///
+/// Every value flows into `MnaSystem::initial_state` exactly like an `ic=`, so a `.IC V(b)=5`
+/// next to `C1 b 0 1e-6 ic=4` is reported by the same `ConflictingConditions` check as two
+/// disagreeing `ic=` capacitors, not resolved in favour of whichever came last.
+fn dot_ic_condition(
+    target: &str,
+    raw_value: &str,
+    line: usize,
+    elements: &[&ElementInstance],
+    index: &UnknownIndex,
+) -> Result<InitialCondition, BuildError> {
+    let error = |message: String| BuildError::InvalidInitialConditionDirective {
+        line,
+        target: target.to_string(),
+        message,
+    };
+    let target_trimmed = target.trim();
+    let Some((kind, inner)) = target_trimmed
+        .strip_suffix(')')
+        .and_then(|without_close| without_close.split_once('('))
+    else {
+        return Err(error(
+            "is not of the form V(<node>), V(<node>,<node>) or I(<inductor>)".into(),
+        ));
+    };
+    let value = Expression::parse_scalar(raw_value)
+        .map_err(|message| error(format!("value '{raw_value}' is not a value: {message}")))?;
+    let element_label = format!(".IC {target_trimmed}");
+
+    let node_index = |name: &str| -> Result<Option<usize>, BuildError> {
+        let name = name.trim();
+        if is_ground(name) {
+            return Ok(None);
+        }
+        index
+            .node(name)
+            .map(Some)
+            .ok_or_else(|| error(format!("names node '{name}', which no element connects to")))
+    };
+
+    match kind.trim().to_ascii_uppercase().as_str() {
+        "V" => {
+            let (positive, negative) = match inner.split_once(',') {
+                Some((first, second)) => (node_index(first)?, node_index(second)?),
+                None => (node_index(inner)?, None),
+            };
+            if positive.is_none() && negative.is_none() {
+                return Err(error(
+                    "assigns a voltage to ground, which is the reference and is always 0".into(),
+                ));
+            }
+            Ok(InitialCondition::CapacitorVoltage {
+                element: element_label,
+                positive,
+                negative,
+                value,
+            })
+        }
+        "I" => {
+            let name = inner.trim();
+            let Some(element) = elements
+                .iter()
+                .find(|element| element.name.eq_ignore_ascii_case(name))
+            else {
+                return Err(error(format!(
+                    "names element '{name}', which this netlist does not declare"
+                )));
+            };
+            if element.device_letter != 'L' {
+                return Err(error(format!(
+                    "names '{name}', which is not an inductor -- I(...) declares an inductor's \
+                     initial current; a node voltage is V(<node>)"
+                )));
+            }
+            Ok(InitialCondition::InductorCurrent {
+                element: element_label,
+                branch: index.branch(name).map_err(|_| {
+                    error(format!(
+                        "names '{name}', which has no branch current in this system (a \
+                         switch-assigned element is stamped as a plain resistance)"
+                    ))
+                })?,
+                value,
+            })
+        }
+        other => Err(error(format!(
+            "'{other}(...)' is not a state -- only V(<node>), V(<node>,<node>) and I(<inductor>) \
+             can be assigned"
+        ))),
+    }
+}
+
 fn initial_condition_field(element: &ElementInstance) -> Option<&str> {
     element
         .raw_params
@@ -1118,6 +1250,19 @@ pub enum BuildError {
     UnknownControllingBranch(String),
     /// A mutual-inductance element refers to an unknown inductor.
     UnknownInductor(String),
+    /// A `.IC` line assigns something this crate cannot start from: a target that is not
+    /// `V(<node>)`, `V(<node>,<node>)` or `I(<inductor>)`, a node or element the netlist does
+    /// not have, ground, or a value that does not parse. Reported rather than dropped, for the
+    /// same reason as [`InvalidElementField`](Self::InvalidElementField) — see
+    /// [`dot_ic_condition`].
+    InvalidInitialConditionDirective {
+        /// 1-based physical line of the `.IC` statement.
+        line: usize,
+        /// The assignment's left-hand side as written.
+        target: String,
+        /// Explanation, already phrased to follow `.IC '<target>' `.
+        message: String,
+    },
 }
 
 impl fmt::Display for BuildError {
@@ -1147,6 +1292,11 @@ impl fmt::Display for BuildError {
                 write!(f, "unknown controlling branch '{name}'")
             }
             Self::UnknownInductor(name) => write!(f, "unknown coupled inductor '{name}'"),
+            Self::InvalidInitialConditionDirective {
+                line,
+                target,
+                message,
+            } => write!(f, "line {line}: .IC '{target}' {message}"),
         }
     }
 }

@@ -83,6 +83,25 @@ equations. `MnaSystem::initial_state(values, tolerance)` turns them into a start
 `unknowns` order, returning `None` (not an all-zero vector) for a netlist that declares none, so
 a caller keeps its own "start from rest" default untouched.
 
+#### The `.IC` directive
+
+The same state can be declared by a `.IC` line, which is honoured, not accepted-and-dropped:
+
+```text
+.IC V(b)=5            * V(b) - V(0) = 5 V at t = 0: identical to ic=5 on a capacitor b-0
+.IC V(b,c)=5          * V(b) - V(c) = 5 V: identical to ic=5 on a capacitor b-c
+.IC I(L1)=12          * 12 A through L1, first node to second: identical to ic=12 on L1
+.IC V(b)=5 I(L1)=12   * several assignments on one line
+```
+
+Each assignment becomes the very same `InitialCondition` the `ic=` field produces, so it is
+applied by `initial_state`, checked by the same consistency rules below, and a `.IC V(b)=5`
+beside `C1 b 0 1e-6 ic=4` is a `ConflictingConditions` error, never resolved in favour of
+whichever came last. A `.IC` that names a node no element connects to, ground, an element that
+is not an inductor, or anything other than `V(...)`/`I(...)` is a build error naming the line
+(`line N: .IC '<target>' ...`). `.NODESET`, a hint to a DC operating-point solve this crate does
+not perform, is reported in `warnings` as having no effect.
+
 #### Sign conventions
 
 **A capacitor's `ic` is the first node's voltage minus the second's.** `C1 b 0 1e-6 ic=5` means
