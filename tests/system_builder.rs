@@ -558,3 +558,91 @@ fn a_subcircuit_block_keeps_its_ic() {
         .unwrap();
     assert_eq!(f.ic, Some(vec![2.0]));
 }
+
+/// A field no parser looked up is a field the run would have silently ignored; it is rejected
+/// with the same `line N: device '<name>' unknown field` shape a device card uses, naming the
+/// keys this `kind=` actually consulted.
+#[test]
+fn an_unknown_field_on_a_block_is_rejected_not_dropped() {
+    let err = build_error("G kind=tf in=U num=[1] den=[1,1] wibble=3\nU kind=const value=1\n");
+    assert_eq!(
+        err,
+        "line 1: device 'G' unknown field 'wibble' (kind=tf accepts only: den, ic, in, num, y0)"
+    );
+    // Not only `Kind::Block` lines: the PWL device kinds go through the same check.
+    let err = build_error(
+        "V1 a 0 1\nR1 a b 1\nD1 b 0 1\nD1 kind=ideal_diode g_breakdown=0 v_breakdown=-100 \
+         g_off=0 v_th=0.5 g_on=5 area=2\n",
+    );
+    assert_eq!(
+        err,
+        "line 4: device 'D1' unknown field 'area' (kind=ideal_diode accepts only: g_breakdown, \
+         g_off, g_on, v_breakdown, v_th)"
+    );
+    // A field that merely looks plausible (`gain=` next to the real `k=`) is still unknown.
+    let err = build_error("G kind=gain in=U k=2 gain=2\nU kind=const value=1\n");
+    assert!(
+        err.starts_with("line 1: device 'G' unknown field 'gain' (kind=gain accepts only: "),
+        "{err}"
+    );
+}
+
+/// Fields that only some configurations of a kind read (`up_down=`/`reset=` on a counter,
+/// `clamp_lo_in=`/`clamp_hi_in=` instead of `clamp_lo=`/`clamp_hi=` on a PID, `ic=` read after
+/// the kind's own arm) are accepted exactly when they are actually read.
+#[test]
+fn conditionally_read_fields_are_still_accepted() {
+    let source = "CNT kind=counter clk=CLK up_down=DIR reset=RST modulus=4 ic=2\n\
+                  CLK kind=const value=0\nDIR kind=const value=1\nRST kind=const value=0\n\
+                  C kind=pid in=E kp=1 ki=1 kd=0 n=1 clamp_lo_in=LO clamp_hi_in=HI\n\
+                  E kind=const value=0\nLO kind=const value=-1\nHI kind=const value=1\n";
+    let System { blocks, .. } = build_system(source, Dialect::Ngspice).unwrap();
+    let cnt = blocks.iter().find(|b| b.name == "CNT").unwrap();
+    assert!(matches!(
+        cnt.kind,
+        BlockKind::Counter {
+            up_down: true,
+            reset: true,
+            modulus: Some(4)
+        }
+    ));
+    assert_eq!(cnt.ic, Some(vec![2.0]));
+    let pid = blocks.iter().find(|b| b.name == "C").unwrap();
+    assert!(matches!(&pid.kind, BlockKind::Pid { clamp, .. } if *clamp == PidClamp::Dynamic));
+}
+
+/// The dynamically-loaded escape hatches take no open-ended user parameters from the netlist
+/// line (their configuration lives in the library or script), so their complete optional
+/// field set is what is accepted -- and everything else is rejected like any other kind.
+#[test]
+fn escape_hatch_blocks_accept_their_whole_optional_field_set() {
+    let source = "S kind=cscript lib=gain.so inputs=U,U outputs=y1,y2 ts=1e-3 to=1e-4 \
+                  xc_count=1\nU kind=const value=1\n";
+    let System { blocks, .. } = build_system(source, Dialect::Ngspice).unwrap();
+    let s = blocks.iter().find(|b| b.name == "S").unwrap();
+    assert!(matches!(&s.kind, BlockKind::CScript { xc_count: 1, .. }));
+    let err = build_error("S kind=cscript lib=gain.so in=U gain=3\nU kind=const value=1\n");
+    assert!(
+        err.starts_with("line 1: device 'S' unknown field 'gain' (kind=cscript accepts only: "),
+        "{err}"
+    );
+}
+
+/// A `.IC` line reaches the electrical system through the unified builder too (the
+/// flattening pass forwards it untouched), so a full deck starts where its author said.
+#[test]
+fn a_dot_ic_directive_reaches_the_mna_system_through_build_system() {
+    let source = "V1 a 0 10\nR1 a b 1000\nC1 b 0 1e-6\n.IC V(b)=5\nG kind=gain in=U k=2\n\
+                  U kind=const value=1\n";
+    let System { mna, .. } = build_system(source, Dialect::Ngspice).unwrap();
+    assert_eq!(mna.initial_conditions.len(), 1);
+    let x = mna
+        .initial_state(
+            &std::collections::BTreeMap::new(),
+            general_mna::DEFAULT_INITIAL_STATE_TOLERANCE,
+        )
+        .unwrap()
+        .unwrap();
+    let vb = mna.unknowns.iter().position(|u| u == "V(b)").unwrap();
+    assert!((x[vb] - 5.0).abs() < 1e-12);
+}

@@ -83,6 +83,25 @@ equations. `MnaSystem::initial_state(values, tolerance)` turns them into a start
 `unknowns` order, returning `None` (not an all-zero vector) for a netlist that declares none, so
 a caller keeps its own "start from rest" default untouched.
 
+#### The `.IC` directive
+
+The same state can be declared by a `.IC` line, which is honoured, not accepted-and-dropped:
+
+```text
+.IC V(b)=5            * V(b) - V(0) = 5 V at t = 0: identical to ic=5 on a capacitor b-0
+.IC V(b,c)=5          * V(b) - V(c) = 5 V: identical to ic=5 on a capacitor b-c
+.IC I(L1)=12          * 12 A through L1, first node to second: identical to ic=12 on L1
+.IC V(b)=5 I(L1)=12   * several assignments on one line
+```
+
+Each assignment becomes the very same `InitialCondition` the `ic=` field produces, so it is
+applied by `initial_state`, checked by the same consistency rules below, and a `.IC V(b)=5`
+beside `C1 b 0 1e-6 ic=4` is a `ConflictingConditions` error, never resolved in favour of
+whichever came last. A `.IC` that names a node no element connects to, ground, an element that
+is not an inductor, or anything other than `V(...)`/`I(...)` is a build error naming the line
+(`line N: .IC '<target>' ...`). `.NODESET`, a hint to a DC operating-point solve this crate does
+not perform, is reported in `warnings` as having no effect.
+
 #### Sign conventions
 
 **A capacitor's `ic` is the first node's voltage minus the second's.** `C1 b 0 1e-6 ic=5` means
@@ -181,6 +200,19 @@ pretending the check is total:
 - **A switch-assigned element's positional parameters.** Its value is replaced wholesale by the
   configured on/off resistance, so its own grammar is not this crate's to enforce; its
   `key=value` fields are still checked.
+
+#### Block (`kind=`) lines
+
+The same rule holds for a block line, with no per-kind table to maintain: the block parser
+records every `key=value` field it reads while building the `kind=` at hand, and a field left
+over afterwards — one no code path for that kind consulted, present or not — is rejected as
+`line N: device '<name>' unknown field '<key>' (kind=<kind> accepts only: ...)`, listing the
+keys that kind did consult. `G kind=tf in=U num=[1] den=[1,1] wibble=3` is a build error, not a
+transfer function with a comment. Conditionally read fields (`up_down=`/`reset=` on a counter,
+`clamp_lo_in=`/`clamp_hi_in=` instead of `clamp_lo=`/`clamp_hi=` on a PID, `ic=`/`y0=`) are
+accepted exactly when they are read. No kind is exempt: the `cscript`/`pyblock`/`pyfunc`/
+`octfunc`/`octblock` escape hatches take their configuration from the library or script they
+name, not from free-form fields on the netlist line.
 
 ### Numeric evaluation of source values (`NumericMnaSystem`)
 

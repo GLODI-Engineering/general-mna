@@ -5,7 +5,8 @@
 //! hand-rolled ~700-line parser that used to live in `general-simulator-cli`'s `main.rs`, which
 //! worked directly off `*`-disguised comment lines instead of real grammar.
 
-use std::collections::BTreeMap;
+use std::cell::RefCell;
+use std::collections::{BTreeMap, BTreeSet};
 
 use continuous_blocks::{
     CoordinateTransform, DiscreteIntegrationMethod, DiscretePid, FlipFlopKind, Hysteresis,
@@ -269,6 +270,59 @@ fn parse_xy_points(
     Ok(points)
 }
 
+/// The `key=value` fields of one block line, remembering every key any parser asks about.
+///
+/// [`build_kind`]'s per-`kind` arms read only the keys they need and never look at what is
+/// left over, so a misspelled or misplaced field (`G kind=tf ... wibble=3`) used to parse and
+/// run as if it had never been written — a block-side twin of the device-card silent drop
+/// `validate_trailing_fields` closes in [`crate::builder`]. Rather than hand-maintaining an
+/// accepted-key list per arm (and keeping it in step with every conditional field: `clamp_lo`
+/// vs `clamp_lo_in`, `reset`, `up_down`, `outputs`, the `ic=`/`y0=` that
+/// [`parse_block_initial_condition`] reads after the arm), every [`get`](Self::get) /
+/// [`contains_key`](Self::contains_key) records its key, and [`unread`](Self::unread) reports
+/// what nobody asked for once the block has been built. A key is "accepted" exactly when
+/// some code path looked it up, present or not — which is the same thing as "would have had
+/// an effect".
+struct Fields {
+    map: BTreeMap<String, String>,
+    looked_up: RefCell<BTreeSet<String>>,
+}
+
+impl Fields {
+    fn new(map: BTreeMap<String, String>) -> Self {
+        Self {
+            map,
+            looked_up: RefCell::new(BTreeSet::new()),
+        }
+    }
+
+    fn get(&self, key: &str) -> Option<&String> {
+        self.looked_up.borrow_mut().insert(key.to_string());
+        self.map.get(key)
+    }
+
+    fn contains_key(&self, key: &str) -> bool {
+        self.get(key).is_some()
+    }
+
+    /// The first field (in key order) present on the line that no parser ever looked up, and
+    /// the sorted list of every key that was looked up (the line's own `kind=` excluded from
+    /// both) for the error message.
+    fn unread(&self) -> Option<(&str, Vec<String>)> {
+        let looked_up = self.looked_up.borrow();
+        let stray = self
+            .map
+            .keys()
+            .find(|key| key.as_str() != "kind" && !looked_up.contains(key.as_str()))?;
+        let accepted = looked_up
+            .iter()
+            .filter(|key| key.as_str() != "kind")
+            .cloned()
+            .collect();
+        Some((stray.as_str(), accepted))
+    }
+}
+
 /// Parses the `ts=`/`freq=`/`to=` fields shared by
 /// `kind=cscript`/`kind=pyblock`/`kind=pyfunc`/`kind=octfunc` into a [`SampleTimeSpec`] —
 /// `ts=variable` (only when `allow_variable`, i.e. never for `pyfunc`/`octfunc`, both
@@ -280,7 +334,7 @@ fn parse_xy_points(
 /// netlist's own `kind=` token, e.g. `"pyfunc"`/`"octfunc"`) names the specific block kind in
 /// the `ts=variable`-rejected error message when `!allow_variable`; unused otherwise.
 fn parse_sample_time(
-    fields: &BTreeMap<String, String>,
+    fields: &Fields,
     name: &str,
     line_number: usize,
     allow_variable: bool,
@@ -378,7 +432,7 @@ fn parse_sample_time(
 /// `freq=` to mean, and `ts=variable` doesn't compose with a fixed-period recursion at all (its
 /// own coefficients are baked in at that one period). See `discrete-time-blocks.md`.
 fn parse_required_periodic_sample_time(
-    fields: &BTreeMap<String, String>,
+    fields: &Fields,
     name: &str,
     line_number: usize,
 ) -> Result<SampleTimeSpec, String> {
@@ -549,7 +603,7 @@ fn parse_matrix_rows(
 fn build_kind(stmt: &general_spice_core::ast::BlockInstance) -> Result<Kind, String> {
     let name = &stmt.name;
     let line_number = stmt.span.start.saturating_sub(1);
-    let fields: BTreeMap<String, String> = stmt.fields.iter().cloned().collect();
+    let fields = Fields::new(stmt.fields.iter().cloned().collect());
 
     let get = |key: &str| -> Result<f64, String> {
         fields
@@ -1661,13 +1715,28 @@ fn build_kind(stmt: &general_spice_core::ast::BlockInstance) -> Result<Kind, Str
         }
     };
 
-    match entry {
+    let entry = match entry {
         Kind::Block(mut block) => {
             block.ic = parse_block_initial_condition(&block.kind, &fields, name, line_number)?;
-            Ok(Kind::Block(block))
+            Kind::Block(block)
         }
-        other => Ok(other),
+        other => other,
+    };
+
+    // Only now, with every conditional lookup done, is a field nobody asked for a field this
+    // line would have silently dropped. The same `line N: device '<name>' unknown field` shape
+    // as the device-card check in `builder.rs`, so a bad field reads the same on either kind
+    // of line. No block kind forwards open-ended user parameters through its fields (the
+    // `cscript`/`pyblock`/`octblock` escape hatches take theirs from their own library or
+    // script, not the netlist line), so no kind is exempt.
+    if let Some((stray, accepted)) = fields.unread() {
+        return Err(format!(
+            "line {}: device '{name}' unknown field '{stray}' (kind={kind} accepts only: {})",
+            line_number + 1,
+            accepted.join(", ")
+        ));
     }
+    Ok(entry)
 }
 
 /// Resolves a block's `ic=` (and, for `kind=tf`/`kind=discretetf`, `y0=`) into
@@ -1681,7 +1750,7 @@ fn build_kind(stmt: &general_spice_core::ast::BlockInstance) -> Result<Kind, Str
 /// author believes, with nothing in the output to say so.
 fn parse_block_initial_condition(
     kind: &BlockKind,
-    fields: &BTreeMap<String, String>,
+    fields: &Fields,
     name: &str,
     line_number: usize,
 ) -> Result<Option<Vec<f64>>, String> {

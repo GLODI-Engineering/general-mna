@@ -2,7 +2,8 @@ use std::collections::BTreeMap;
 
 use crate::{Expression, Matrix, TransientFunction};
 
-/// One `ic=` initial condition, already resolved against this system's own unknown ordering.
+/// One `ic=` (or `.IC`) initial condition, already resolved against this system's own unknown
+/// ordering.
 ///
 /// **Sign conventions, stated once, explicitly** — these are the half that gets misremembered:
 ///
@@ -81,8 +82,11 @@ pub struct MnaSystem {
     /// already has to be supplied per step — see `transient_source`'s own module doc comment.
     /// Empty for a netlist with no such sources (every existing caller is unaffected).
     pub transient_sources: BTreeMap<String, TransientFunction>,
-    /// Every `ic=` initial condition declared on a storage element, in netlist order. Empty for
-    /// a netlist that declares none, which is every netlist that predates the feature.
+    /// Every `ic=` initial condition declared on a storage element, in netlist order, followed
+    /// by every `.IC V(node)=` / `.IC V(n1,n2)=` / `.IC I(inductor)=` assignment, in netlist
+    /// order (a `.IC` node voltage is a [`InitialCondition::CapacitorVoltage`] whose second
+    /// terminal is ground, labelled `.IC V(node)`). Empty for a netlist that declares none,
+    /// which is every netlist that predates the feature.
     ///
     /// These are *not* folded into `a`/`k`/`b`/`u` — the descriptor system is the circuit's
     /// equations, and an initial condition is a statement about `x` at one instant, not about
