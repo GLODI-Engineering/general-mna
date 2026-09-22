@@ -809,3 +809,201 @@ fn an_ic_free_deck_never_reaches_the_consistency_check() {
         None
     );
 }
+
+// ---------------------------------------------------------------------------------------------
+// .IC directive (general-mna#12)
+// ---------------------------------------------------------------------------------------------
+
+/// One backward-Euler step of `A x + K dx/dt = B u` from `x0`: solves
+/// `(A + K/dt) x1 = u + (K/dt) x0` by Gaussian elimination, small enough to keep the test
+/// self-contained.
+fn backward_euler_step(system: &general_mna::MnaSystem, x0: &[f64], dt: f64) -> Vec<f64> {
+    let numeric = numeric(system, &[]);
+    let n = x0.len();
+    let mut m: Vec<Vec<f64>> = (0..n)
+        .map(|row| {
+            let mut augmented: Vec<f64> = (0..n)
+                .map(|col| numeric.a[(row, col)] + numeric.k[(row, col)] / dt)
+                .collect();
+            let rhs = numeric.u[row]
+                + x0.iter()
+                    .enumerate()
+                    .map(|(col, x)| numeric.k[(row, col)] / dt * x)
+                    .sum::<f64>();
+            augmented.push(rhs);
+            augmented
+        })
+        .collect();
+    for pivot in 0..n {
+        let best = (pivot..n)
+            .max_by(|a, b| m[*a][pivot].abs().total_cmp(&m[*b][pivot].abs()))
+            .unwrap();
+        m.swap(pivot, best);
+        for row in 0..n {
+            if row == pivot {
+                continue;
+            }
+            let factor = m[row][pivot] / m[pivot][pivot];
+            for col in pivot..=n {
+                m[row][col] -= factor * m[pivot][col];
+            }
+        }
+    }
+    (0..n).map(|row| m[row][n] / m[row][row]).collect()
+}
+
+#[test]
+fn a_dot_ic_node_voltage_is_the_same_assignment_as_ic_on_the_capacitor() {
+    // The reproducer: `.IC V(b)=5` used to be accepted and discarded, so the run started from
+    // rest. It now produces exactly the starting vector `C1 b 0 1e-6 ic=5` produces, and one
+    // backward-Euler step with dt = 10 us lands where the ic= deck lands (0.51/0.101), not
+    // where a start from rest lands (0.01/0.101).
+    let (via_field, x_field) = ic_state("V1 a 0 10\nR1 a b 1000\nC1 b 0 1e-6 ic=5");
+    let (via_directive, x_directive) = ic_state("V1 a 0 10\nR1 a b 1000\nC1 b 0 1e-6\n.IC V(b)=5");
+    assert_eq!(via_directive.unknowns, via_field.unknowns);
+    assert_eq!(x_directive, x_field);
+    assert!((x_directive[index(&via_directive, "V(b)")] - 5.0).abs() < 1e-12);
+
+    let x1 = backward_euler_step(&via_directive, &x_directive, 1e-5);
+    let vb = x1[index(&via_directive, "V(b)")];
+    assert!(
+        (vb - 0.51 / 0.101).abs() < 1e-9,
+        "V(b) after one step = {vb}"
+    );
+    let from_rest = backward_euler_step(&via_directive, &vec![0.0; x_directive.len()], 1e-5);
+    assert!((from_rest[index(&via_directive, "V(b)")] - 0.01 / 0.101).abs() < 1e-9);
+
+    // Case and spelling: `.ic v(b)=5`, and a directive before the elements it names.
+    let (_, x_lower) = ic_state(".ic v(b)=5\nV1 a 0 10\nR1 a b 1000\nC1 b 0 1e-6");
+    assert_eq!(x_lower, x_field);
+}
+
+#[test]
+fn a_dot_ic_that_contradicts_an_ic_field_is_reported_not_resolved() {
+    // `.IC V(b)=5` and `C1 b 0 ... ic=4` both claim V(b) - V(0); neither silently wins.
+    let error = ic_error("V1 a 0 10\nR1 a b 1000\nC1 b 0 1e-6 ic=4\n.IC V(b)=5");
+    assert!(
+        matches!(
+            error,
+            general_mna::InitialStateError::ConflictingConditions { .. }
+        ),
+        "{error}"
+    );
+    assert!(error.to_string().contains(".IC V(b)"), "{error}");
+    // Two .IC lines disagreeing with each other are the same contradiction.
+    let error = ic_error("V1 a 0 10\nR1 a b 1000\nC1 b 0 1e-6\n.IC V(b)=5\n.IC V(b)=4");
+    assert!(
+        matches!(
+            error,
+            general_mna::InitialStateError::ConflictingConditions { .. }
+        ),
+        "{error}"
+    );
+    // A .IC that the circuit's own algebra forbids (the node is pinned by an ideal source) is
+    // the same InconsistentWithCircuit an ic= across a voltage source is.
+    let error = ic_error("V1 a 0 10\nR1 a b 1000\nC1 b 0 1e-6\n.IC V(a)=5");
+    assert!(
+        matches!(
+            error,
+            general_mna::InitialStateError::InconsistentWithCircuit { .. }
+        ),
+        "{error}"
+    );
+}
+
+#[test]
+fn a_dot_ic_inductor_current_and_differential_voltage_map_like_their_ic_fields() {
+    let (_, x_field) = ic_state("V1 a 0 10\nL1 a b 5e-6 ic=12\nR1 b 0 10");
+    let (_, x_directive) = ic_state("V1 a 0 10\nL1 a b 5e-6\nR1 b 0 10\n.IC I(L1)=12");
+    assert_eq!(x_directive, x_field);
+    // V(n1,n2) is the difference V(n1) - V(n2), exactly a capacitor's ic= between those nodes.
+    let (_, x_field) = ic_state("V1 a 0 10\nR1 a b 1000\nC1 b c 1e-6 ic=5\nR2 c 0 1000");
+    let (_, x_directive) =
+        ic_state("V1 a 0 10\nR1 a b 1000\nC1 b c 1e-6\nR2 c 0 1000\n.IC V(b,c)=5");
+    assert_eq!(x_directive, x_field);
+    // Several assignments on one line, mixed kinds.
+    let (system, x) =
+        ic_state("V1 a 0 10\nR1 a b 1000\nC1 b 0 1e-6\nL1 b c 1e-3\nR2 c 0 10\n.IC V(b)=5 I(L1)=2");
+    assert!((x[index(&system, "V(b)")] - 5.0).abs() < 1e-12);
+    assert!((x[index(&system, "I(L1)")] - 2.0).abs() < 1e-12);
+}
+
+#[test]
+fn a_dot_ic_that_names_nothing_the_circuit_has_is_a_build_error() {
+    let deck = "V1 a 0 10\nR1 a b 1000\nC1 b 0 1e-6\n";
+    for (directive, expected) in [
+        (
+            ".IC V(zz)=5",
+            "line 4: .IC 'V(zz)' names node 'zz', which no element connects to",
+        ),
+        (
+            ".IC V(0)=5",
+            "line 4: .IC 'V(0)' assigns a voltage to ground, which is the reference and is \
+             always 0",
+        ),
+        (
+            ".IC I(V1)=5",
+            "line 4: .IC 'I(V1)' names 'V1', which is not an inductor -- I(...) declares an \
+             inductor's initial current; a node voltage is V(<node>)",
+        ),
+        (
+            ".IC I(L9)=5",
+            "line 4: .IC 'I(L9)' names element 'L9', which this netlist does not declare",
+        ),
+        (
+            ".IC b=5",
+            "line 4: .IC 'b' is not of the form V(<node>), V(<node>,<node>) or I(<inductor>)",
+        ),
+        (
+            ".IC P(b)=5",
+            "line 4: .IC 'P(b)' 'P(...)' is not a state -- only V(<node>), V(<node>,<node>) and \
+             I(<inductor>) can be assigned",
+        ),
+    ] {
+        let error = build_error(&format!("{deck}{directive}"));
+        assert!(
+            matches!(
+                error,
+                BuildError::InvalidInitialConditionDirective { line: 4, .. }
+            ),
+            "{directive}: {error:?}"
+        );
+        assert_eq!(error.to_string(), expected, "{directive}");
+    }
+    // A bare symbol is a value this crate keeps symbolic (the same as `ic={vinit}` on a card),
+    // resolved through `values` at initial_state time; an unparseable token is not.
+    let system = MnaBuilder::new(Dialect::Ngspice)
+        .build_fragment(&format!("{deck}.IC V(b)=vinit"))
+        .unwrap();
+    let x = system
+        .initial_state(
+            &BTreeMap::from([("vinit".to_string(), 2.5)]),
+            general_mna::DEFAULT_INITIAL_STATE_TOLERANCE,
+        )
+        .unwrap()
+        .unwrap();
+    assert!((x[index(&system, "V(b)")] - 2.5).abs() < 1e-12);
+    let error = build_error(&format!("{deck}.IC V(b)="));
+    assert!(
+        error
+            .to_string()
+            .starts_with("line 4: .IC 'V(b)' value '' is not a value"),
+        "{error}"
+    );
+}
+
+#[test]
+fn a_nodeset_is_reported_as_having_no_effect() {
+    // A .NODESET is a hint to an operating-point solve this crate does not do. It changes no
+    // equation and no starting state, and says so in the warnings instead of vanishing.
+    let system = MnaBuilder::new(Dialect::Ngspice)
+        .build_fragment("V1 a 0 10\nR1 a b 1000\nC1 b 0 1e-6\n.NODESET V(b)=5")
+        .unwrap();
+    assert!(system.initial_conditions.is_empty());
+    assert_eq!(system.warnings.len(), 1);
+    assert!(
+        system.warnings[0].starts_with("line 4: .NODESET is a hint"),
+        "{}",
+        system.warnings[0]
+    );
+}
