@@ -102,6 +102,13 @@ is not an inductor, or anything other than `V(...)`/`I(...)` is a build error na
 (`line N: .IC '<target>' ...`). `.NODESET`, a hint to a DC operating-point solve this crate does
 not perform, is reported in `warnings` as having no effect.
 
+A `.IC` inside a `.subckt` body is resolved through `parse_and_flatten` exactly like the body's
+element cards and `phys2sig` `node=`/`branch=` fields: a declared port names the caller's
+connecting node, an internal node or element name gets the instance's dotted prefix
+(`.IC V(mid)=5 I(L1)=2` in `X1` becomes `V(X1.mid)`, `I(X1.L1)`), and ground stays ground. Each
+instance of the subcircuit gets its own copy, and an unknown target is reported under the
+resolved name (`.IC 'V(X1.nowhere)' names node 'X1.nowhere', ...`).
+
 #### Sign conventions
 
 **A capacitor's `ic` is the first node's voltage minus the second's.** `C1 b 0 1e-6 ic=5` means

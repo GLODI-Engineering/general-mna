@@ -646,3 +646,141 @@ fn a_dot_ic_directive_reaches_the_mna_system_through_build_system() {
     let vb = mna.unknowns.iter().position(|u| u == "V(b)").unwrap();
     assert!((x[vb] - 5.0).abs() < 1e-12);
 }
+
+// ---------------------------------------------------------------------------------------------
+// .IC inside a .subckt body (general-mna#18)
+// ---------------------------------------------------------------------------------------------
+
+/// Builds `source` and returns the electrical system with its `initial_state`, so two decks
+/// that must start identically can be compared unknown-by-unknown.
+fn ic_state_through_build_system(source: &str) -> (general_mna::MnaSystem, Vec<f64>) {
+    let System { mna, .. } = build_system(source, Dialect::Ngspice).unwrap();
+    let x = mna
+        .initial_state(
+            &std::collections::BTreeMap::new(),
+            general_mna::DEFAULT_INITIAL_STATE_TOLERANCE,
+        )
+        .unwrap()
+        .unwrap();
+    (mna, x)
+}
+
+fn unknown_index(mna: &general_mna::MnaSystem, name: &str) -> usize {
+    mna.unknowns
+        .iter()
+        .position(|u| u == name)
+        .unwrap_or_else(|| panic!("no unknown '{name}' in {:?}", mna.unknowns))
+}
+
+/// The issue's own deck: the `.IC V(out)=5` inside `filt` used to keep its unmangled name
+/// after flattening and fail the "no element connects to" check. `out` is a declared port
+/// bound to `b`, so the deck must start exactly where the explicit, already-flat statement
+/// list `X1.C1 b 0 1u ic=5` starts -- built by hand and fed to the same `build_statements`
+/// the unified builder feeds, since the parser reads a textual `X1.C1` as an `X` card.
+#[test]
+fn a_dot_ic_inside_a_subckt_body_starts_where_the_explicit_ic_field_starts() {
+    use general_mna::MnaBuilder;
+    use general_spice_core::ast::{ElementInstance, Statement};
+
+    let deck = "V1 a 0 10\nR1 a b 1000\n.subckt filt in out\nC1 out 0 1u\n.IC V(out)=5\n\
+                .ends\nX1 a b filt\n";
+    let (via_subckt, x_subckt) = ic_state_through_build_system(deck);
+
+    let flat = general_mna::parse_and_flatten("V1 a 0 10\nR1 a b 1000\n", Dialect::Ngspice)
+        .unwrap()
+        .into_iter()
+        .chain(std::iter::once(Statement::ElementInstance(
+            ElementInstance {
+                device_letter: 'C',
+                name: "X1.C1".to_string(),
+                nodes: vec!["b".to_string(), "0".to_string()],
+                raw_params: vec!["1u".to_string(), "ic=5".to_string()],
+                subckt_name: None,
+                span: 4..5,
+            },
+        )))
+        .collect::<Vec<_>>();
+    let via_field = MnaBuilder::new(Dialect::Ngspice)
+        .build_statements(&flat)
+        .unwrap();
+    let x_field = via_field
+        .initial_state(
+            &std::collections::BTreeMap::new(),
+            general_mna::DEFAULT_INITIAL_STATE_TOLERANCE,
+        )
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(via_subckt.unknowns, via_field.unknowns);
+    assert_eq!(via_subckt.initial_conditions.len(), 1);
+    assert_eq!(x_subckt, x_field);
+    assert!((x_subckt[unknown_index(&via_subckt, "V(b)")] - 5.0).abs() < 1e-12);
+}
+
+/// The same deck with the capacitor on a purely internal node: the `.IC` resolves to
+/// `V(X1.mid)`, the dotted-path name every other reference to that node carries.
+#[test]
+fn a_dot_ic_on_an_internal_subckt_node_binds_to_the_dotted_path_node() {
+    let (mna, x) = ic_state_through_build_system(
+        "V1 a 0 10\nR1 a b 1000\n.subckt filt in out\nR1 in mid 10\nC1 mid 0 1u\n\
+         R2 mid out 10\n.IC V(mid)=5\n.ends\nX1 b c filt\nR3 c 0 1000\n",
+    );
+    assert_eq!(mna.initial_conditions.len(), 1);
+    assert!((x[unknown_index(&mna, "V(X1.mid)")] - 5.0).abs() < 1e-12);
+}
+
+/// A `.IC` on a declared port names the caller's connecting node, not `X1.<port>`; the
+/// `V(<n1>,<n2>)` form resolves each terminal on its own (here a port and ground).
+#[test]
+fn a_dot_ic_on_a_subckt_port_binds_to_the_callers_node() {
+    let (mna, x) = ic_state_through_build_system(
+        "V1 a 0 10\nR1 a b 1000\n.subckt leg in out\nR1 in out 10\nC1 out 0 1u\n\
+         .IC V(out,0)=5\n.ends\nX1 b c leg\nR2 c 0 1000\n",
+    );
+    assert_eq!(mna.initial_conditions.len(), 1);
+    assert!(
+        mna.unknowns.iter().all(|u| u != "V(X1.out)"),
+        "{:?}",
+        mna.unknowns
+    );
+    assert!((x[unknown_index(&mna, "V(c)")] - 5.0).abs() < 1e-12);
+}
+
+/// Two instances of the same subcircuit each carry their own copy of the body's `.IC`, on
+/// their own internal node, and the `I(<inductor>)` form follows the element's dotted name.
+#[test]
+fn each_instance_of_a_subckt_gets_its_own_dot_ic() {
+    let (mna, x) = ic_state_through_build_system(
+        "V1 a 0 10\n.subckt leg in out\nL1 in mid 1e-3\nR1 mid out 10\nC1 mid 0 1u\n\
+         .IC V(mid)=5 I(L1)=2\n.ends\nX1 a b leg\nX2 b c leg\nR2 c 0 1000\n",
+    );
+    assert_eq!(mna.initial_conditions.len(), 4);
+    for instance in ["X1", "X2"] {
+        let v_mid = x[unknown_index(&mna, &format!("V({instance}.mid)"))];
+        let i_l1 = x[unknown_index(&mna, &format!("I({instance}.L1)"))];
+        assert!((v_mid - 5.0).abs() < 1e-12, "{instance}: V(mid) = {v_mid}");
+        assert!((i_l1 - 2.0).abs() < 1e-12, "{instance}: I(L1) = {i_l1}");
+    }
+}
+
+/// A `.IC` inside a body naming a node nothing in that body connects to is still rejected,
+/// and the message shows the resolved (dotted) name the builder actually looked for.
+#[test]
+fn a_dot_ic_on_an_unknown_subckt_node_still_errors_with_the_mangled_name() {
+    let err = build_error(
+        "V1 a 0 10\n.subckt leg in out\nR1 in out 10\n.IC V(nowhere)=5\n.ends\nX1 a b leg\n\
+         R2 b 0 1000\n",
+    );
+    assert_eq!(
+        err,
+        "line 4: .IC 'V(X1.nowhere)' names node 'X1.nowhere', which no element connects to"
+    );
+    let err = build_error(
+        "V1 a 0 10\n.subckt leg in out\nR1 in out 10\n.IC I(L9)=5\n.ends\nX1 a b leg\n\
+         R2 b 0 1000\n",
+    );
+    assert_eq!(
+        err,
+        "line 4: .IC 'I(X1.L9)' names element 'X1.L9', which this netlist does not declare"
+    );
+}
