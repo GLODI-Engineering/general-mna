@@ -9,12 +9,43 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+# Cargo.toml resolves general-spice-core, continuous-blocks and pwl-devices as *path*
+# dependencies into the sibling checkouts `../spice-lsp` and `../general-simulator` (see the
+# comment there for why `path` + `version` are both kept). A runner only has this repository,
+# so every job reproduces the local three-directory layout under $GITHUB_WORKSPACE:
+#
+#   $GITHUB_WORKSPACE/general-mna          <- this repository (working directory of every step)
+#   $GITHUB_WORKSPACE/general-simulator    <- GLODI-Engineering/general-simulator, default branch
+#   $GITHUB_WORKSPACE/spice-lsp            <- GLODI-Engineering/spice-lsp, default branch
+#
+# so that `../general-simulator/crates/continuous-blocks` etc. resolve exactly as they do on a
+# developer machine. Both sibling repositories are public, so the default GITHUB_TOKEN can read
+# them; no extra secret is needed.
+
 jobs:
   rust:
     name: Rust (fmt, clippy, test -- default features)
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: general-mna
     steps:
-      - uses: actions/checkout@v4
+      - name: Check out general-mna
+        uses: actions/checkout@v4
+        with:
+          path: general-mna
+
+      - name: Check out sibling general-simulator (continuous-blocks, pwl-devices)
+        uses: actions/checkout@v4
+        with:
+          repository: GLODI-Engineering/general-simulator
+          path: general-simulator
+
+      - name: Check out sibling spice-lsp (general-spice-core)
+        uses: actions/checkout@v4
+        with:
+          repository: GLODI-Engineering/spice-lsp
+          path: spice-lsp
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -23,6 +54,8 @@ jobs:
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: general-mna
 
       - name: cargo fmt --check
         run: cargo fmt --all -- --check
@@ -43,8 +76,26 @@ jobs:
   rust-python:
     name: Rust (build, clippy -- optional python feature)
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: general-mna
     steps:
-      - uses: actions/checkout@v4
+      - name: Check out general-mna
+        uses: actions/checkout@v4
+        with:
+          path: general-mna
+
+      - name: Check out sibling general-simulator (continuous-blocks, pwl-devices)
+        uses: actions/checkout@v4
+        with:
+          repository: GLODI-Engineering/general-simulator
+          path: general-simulator
+
+      - name: Check out sibling spice-lsp (general-spice-core)
+        uses: actions/checkout@v4
+        with:
+          repository: GLODI-Engineering/spice-lsp
+          path: spice-lsp
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -53,6 +104,8 @@ jobs:
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: general-mna
 
       - name: Install Python
         uses: actions/setup-python@v5
