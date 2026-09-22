@@ -2344,7 +2344,14 @@ pub enum PhysicalDomain {
 /// **Generic field-parsing errors**, shared by every `kind=` block and not repeated per
 /// variant below: a field required by that `kind` but absent from the line is `line N: device
 /// '<name>' missing field '<key>'`; present but not parseable as the expected type (almost
-/// always `f64`) is `line N: device '<name>' field '<key>' is not a number`.
+/// always `f64`) is `line N: device '<name>' field '<key>' is not a number`; present but read
+/// by nothing for that `kind` (a misspelling, or a field that belongs to another kind) is
+/// `line N: device '<name>' unknown field '<key>' (kind=<kind> accepts only: ...)`, listing the
+/// keys that `kind` consulted on that line — the same shape a device card's unknown field
+/// reports. Nothing on a block line is silently ignored: the only keys a kind accepts are the
+/// ones documented in its own `## Parameters` (plus `ic=`/`y0=` below), and the escape hatches
+/// (`cscript`/`pyblock`/`pyfunc`/`octfunc`/`octblock`) take no free-form parameters from the
+/// netlist line either.
 ///
 /// **Initial conditions.** Every block that carries state across steps accepts an optional
 /// `ic=` (each such variant's own `## Parameters` says what it means there); an `ic=` on any

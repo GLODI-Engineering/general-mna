@@ -182,6 +182,19 @@ pretending the check is total:
   configured on/off resistance, so its own grammar is not this crate's to enforce; its
   `key=value` fields are still checked.
 
+#### Block (`kind=`) lines
+
+The same rule holds for a block line, with no per-kind table to maintain: the block parser
+records every `key=value` field it reads while building the `kind=` at hand, and a field left
+over afterwards — one no code path for that kind consulted, present or not — is rejected as
+`line N: device '<name>' unknown field '<key>' (kind=<kind> accepts only: ...)`, listing the
+keys that kind did consult. `G kind=tf in=U num=[1] den=[1,1] wibble=3` is a build error, not a
+transfer function with a comment. Conditionally read fields (`up_down=`/`reset=` on a counter,
+`clamp_lo_in=`/`clamp_hi_in=` instead of `clamp_lo=`/`clamp_hi=` on a PID, `ic=`/`y0=`) are
+accepted exactly when they are read. No kind is exempt: the `cscript`/`pyblock`/`pyfunc`/
+`octfunc`/`octblock` escape hatches take their configuration from the library or script they
+name, not from free-form fields on the netlist line.
+
 ### Numeric evaluation of source values (`NumericMnaSystem`)
 
 `MnaSystem::evaluate()` numerically evaluates `a`, `k`, `b`, and now also each
