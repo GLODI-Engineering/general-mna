@@ -14,13 +14,18 @@ env:
 # comment there for why `path` + `version` are both kept). A runner only has this repository,
 # so every job reproduces the local three-directory layout under $GITHUB_WORKSPACE:
 #
-#   $GITHUB_WORKSPACE/general-mna          <- this repository (working directory of every step)
-#   $GITHUB_WORKSPACE/general-simulator    <- GLODI-Engineering/general-simulator, default branch
-#   $GITHUB_WORKSPACE/spice-lsp            <- GLODI-Engineering/spice-lsp, default branch
+#   $GITHUB_WORKSPACE/general-mna               <- this repository (working directory of every step)
+#   $GITHUB_WORKSPACE/general-simulator         <- GLODI-Engineering/general-simulator, default branch
+#   $GITHUB_WORKSPACE/spice-lsp                 <- GLODI-Engineering/spice-lsp, default branch
+#   $GITHUB_WORKSPACE/gs-waveform-measurements  <- GLODI-Engineering/gs-waveform-measurements, default branch
 #
 # so that `../general-simulator/crates/continuous-blocks` etc. resolve exactly as they do on a
-# developer machine. Both sibling repositories are public, so the default GITHUB_TOKEN can read
-# them; no extra secret is needed.
+# developer machine. The fourth checkout is not a dependency of this crate at all: cargo loads
+# every member manifest of the sibling *workspace* a path dependency belongs to, and
+# general-simulator's CLI member points at `../../../gs-waveform-measurements`, so without it
+# `cargo metadata` (which `cargo fmt --all` runs first) fails before anything is built. All
+# three sibling repositories are public, so the default GITHUB_TOKEN can read them; no extra
+# secret is needed.
 
 jobs:
   rust:
@@ -46,6 +51,12 @@ jobs:
         with:
           repository: GLODI-Engineering/spice-lsp
           path: spice-lsp
+
+      - name: Check out sibling gs-waveform-measurements (general-simulator workspace member dependency)
+        uses: actions/checkout@v4
+        with:
+          repository: GLODI-Engineering/gs-waveform-measurements
+          path: gs-waveform-measurements
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -96,6 +107,12 @@ jobs:
         with:
           repository: GLODI-Engineering/spice-lsp
           path: spice-lsp
+
+      - name: Check out sibling gs-waveform-measurements (general-simulator workspace member dependency)
+        uses: actions/checkout@v4
+        with:
+          repository: GLODI-Engineering/gs-waveform-measurements
+          path: gs-waveform-measurements
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
