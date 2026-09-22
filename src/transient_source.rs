@@ -350,10 +350,15 @@ impl TransientFunction {
                 })
             }
             "PWL" => {
-                if args.len() < 2 || args.len() % 2 != 0 {
+                if args.len() < 2 || !args.len().is_multiple_of(2) {
                     return None;
                 }
-                let points: Vec<(f64, f64)> = args.chunks_exact(2).map(|c| (c[0], c[1])).collect();
+                let points: Vec<(f64, f64)> = args
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .map(|&[t, v]| (t, v))
+                    .collect();
                 PwlPoints::new(&points).map(TransientFunction::Pwl)
             }
             "SFFM" => {
