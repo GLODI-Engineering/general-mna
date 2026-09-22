@@ -1033,7 +1033,10 @@ pub enum BlockKind {
     /// - `inputs=<freq,phase,duty>` — exactly 3, in this order: `freq` (Hz, clamped internally
     ///   to `[f_min, f_max]`), `phase` (`[0,1)`, a phase-shift command as a fraction of one
     ///   carrier period — *not* this block's own internal integration state, a different
-    ///   thing), `duty` (`[0,1]`, clamped).
+    ///   thing; applied as a **lead**: conduction begins at $(1 - \text{phase})$ of the
+    ///   carrier period, so `0.25` starts the pulse three quarters of the way through the
+    ///   period, not one quarter — see the user guide's gate-bindings chapter for the run that
+    ///   shows it), `duty` (`[0,1]`, clamped).
     /// - `red=<f64>`, `fed=<f64>` — optional, default `0.0`; seconds, converted internally to a
     ///   phase fraction using the current resolved frequency.
     /// - `outputs=<main,complement>` — optional; defaults to `<name>,<name>_comp`.
