@@ -124,10 +124,15 @@ jobs:
         with:
           workspaces: general-mna
 
+      # Pinned, not "3.x". That floats forward with the runner image and has
+      # now outrun the pinned PyO3: this job began failing with "the
+      # configured Python version (3.15) is newer than PyO3's maximum
+      # supported version (3.14)" on a commit that touched only a Markdown
+      # file. Raise this deliberately when PyO3 is upgraded.
       - name: Install Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.x"
+          python-version: "3.12"
 
       - name: cargo clippy (python feature)
         run: cargo clippy --workspace --all-targets --features python -- -D warnings
