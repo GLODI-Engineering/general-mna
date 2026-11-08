@@ -588,3 +588,52 @@ mod tests {
         assert_eq!(product.to_string(), "1 / (R * C)");
     }
 }
+
+#[cfg(test)]
+mod frontend_parity_tests {
+    use super::parse_spice_number;
+
+    /// The editor mirrors this grammar so it can show the user what the
+    /// solver will read. These are the exact cases its own tests assert, so
+    /// the two cannot drift apart silently — and the one that matters is
+    /// `M`, which is milli here and is routinely written meaning mega.
+    #[test]
+    fn matches_the_editor_table() {
+        let cases: &[(&str, Option<f64>)] = &[
+            ("1000", Some(1000.0)),
+            ("-2.5", Some(-2.5)),
+            ("1e3", Some(1000.0)),
+            ("1t", Some(1e12)),
+            ("1g", Some(1e9)),
+            ("2k", Some(2e3)),
+            ("1M", Some(1e-3)),
+            ("1m", Some(1e-3)),
+            ("10M", Some(1e-2)),
+            ("1MEG", Some(1e6)),
+            ("1meg", Some(1e6)),
+            ("1u", Some(1e-6)),
+            ("1n", Some(1e-9)),
+            ("1p", Some(1e-12)),
+            ("1f", Some(1e-15)),
+            ("1kohm", Some(1000.0)),
+            ("10uF", Some(1e-5)),
+            ("1MEGohm", Some(1e6)),
+            ("1x", None),
+            ("abc", None),
+            ("k10", None),
+        ];
+        for (raw, want) in cases {
+            let got = parse_spice_number(raw);
+            match want {
+                Some(expected) => {
+                    let value = got.unwrap_or_else(|| panic!("{raw} did not parse"));
+                    assert!(
+                        (value - expected).abs() <= expected.abs() * 1e-12,
+                        "{raw}: got {value}, want {expected}"
+                    );
+                }
+                None => assert!(got.is_none(), "{raw}: expected a refusal, got {got:?}"),
+            }
+        }
+    }
+}
