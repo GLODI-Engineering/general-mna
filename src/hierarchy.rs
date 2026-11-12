@@ -147,6 +147,23 @@ fn expand_body(
                         let mut mangled = ei.clone();
                         mangled.name = format!("{prefix}{}", ei.name);
                         mangled.nodes = mangled_nodes;
+                        // An `F`/`H` card names the voltage source whose branch current
+                        // controls it, and that name is scoped to the body it is written in.
+                        // Flattening renames every element in that body, so the reference has
+                        // to move with them. Without this, `F1 p1 p2 VS 0.25` inside a
+                        // `.subckt` survives expansion still pointing at `VS` while the source
+                        // itself became `X1.VS`, and the build fails with
+                        // `unknown controlling branch 'VS'`.
+                        //
+                        // This is what stopped an ideal transformer from being a reusable
+                        // subcircuit: the E/F pair one is built from needs exactly this
+                        // reference, and it is the only device grammar that carries an element
+                        // name in `raw_params` rather than a node in `nodes`.
+                        if matches!(ei.device_letter, 'F' | 'H') {
+                            if let Some(control) = mangled.raw_params.first_mut() {
+                                *control = format!("{prefix}{control}");
+                            }
+                        }
                         out.push(Statement::ElementInstance(mangled));
                     }
                     Some(sub_name) => {
@@ -460,6 +477,64 @@ mod tests {
         let statements = vec![x_call("X1", &["a", "b"], "nope")];
         let err = flatten(&statements).unwrap_err();
         assert!(err.contains("undefined subcircuit"), "unexpected: {err}");
+    }
+
+    /// An `F`/`H` card names the voltage source whose branch current controls
+    /// it. That name is scoped to the body it is written in, so flattening has
+    /// to move it along with the element it names.
+    ///
+    /// This is the shape an ideal transformer takes as a reusable `.subckt` —
+    /// a VCVS, a 0 V sense source and a CCCS that references it. Before this,
+    /// the reference survived expansion unprefixed and the build failed with
+    /// `unknown controlling branch 'VS'`.
+    #[test]
+    fn a_current_controlled_source_follows_its_controlling_branch_across_a_subckt() {
+        let f_card = Statement::ElementInstance(ElementInstance {
+            device_letter: 'F',
+            name: "F1".to_string(),
+            nodes: vec!["p1".to_string(), "p2".to_string()],
+            raw_params: vec!["VS".to_string(), "0.25".to_string()],
+            subckt_name: None,
+            span: 1..2,
+        });
+        let statements = vec![
+            subckt("xfmr", &["p1", "p2"]),
+            element('V', "VS", &["p1", "mid"]),
+            f_card,
+            ends("xfmr"),
+            x_call("X1", &["a", "b"], "xfmr"),
+        ];
+        let flat = flatten(&statements).unwrap();
+        let Statement::ElementInstance(source) = &flat[0] else {
+            unreachable!()
+        };
+        let Statement::ElementInstance(cccs) = &flat[1] else {
+            unreachable!()
+        };
+        assert_eq!(source.name, "X1.VS");
+        assert_eq!(cccs.name, "X1.F1");
+        // The reference must name the source as it is now called, not as it
+        // was written inside the body.
+        assert_eq!(cccs.raw_params[0], "X1.VS");
+        assert_eq!(cccs.raw_params[1], "0.25", "the gain is left alone");
+    }
+
+    /// Only `F`/`H` carry an element name in `raw_params`; every other device
+    /// puts a value there, and prefixing that would corrupt it.
+    #[test]
+    fn a_plain_element_keeps_its_value_untouched_across_a_subckt() {
+        let statements = vec![
+            subckt("div", &["a", "b"]),
+            element('R', "R1", &["a", "b"]),
+            ends("div"),
+            x_call("X1", &["in", "out"], "div"),
+        ];
+        let flat = flatten(&statements).unwrap();
+        let Statement::ElementInstance(r) = &flat[0] else {
+            unreachable!()
+        };
+        assert_eq!(r.name, "X1.R1");
+        assert_eq!(r.raw_params[0], "100");
     }
 
     #[test]
