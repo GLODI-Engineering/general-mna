@@ -1,11 +1,11 @@
 [package]
 name = "general-mna"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2021"
 description = "Educational modified nodal analysis and converter averaging built on general-spice-core"
 license = "AGPL-3.0-or-later"
-repository = "https://github.com/Elvis-codeur/general-mna"
-homepage = "https://github.com/Elvis-codeur/general-mna"
+repository = "https://github.com/GLODI-Engineering/general-mna"
+homepage = "https://github.com/GLODI-Engineering/general-mna"
 documentation = "https://docs.rs/general-mna"
 readme = "README.md"
 keywords = ["spice", "circuit-simulation", "mna", "electronics"]
