@@ -658,7 +658,8 @@ fn build_kind(stmt: &general_spice_core::ast::BlockInstance) -> Result<Kind, Str
     let renamed = |old: &str, replacement: &str, why: &str| -> Option<String> {
         fields.present_unread(old).then(|| {
             format!(
-                "line {}: device '{name}' field '{old}' no longer exists -- write                  '{replacement}'. {why}",
+                "line {}: device '{name}' field '{old}' no longer exists -- write \
+                 '{replacement}'. {why}",
                 line_number + 1
             )
         })
