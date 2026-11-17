@@ -62,6 +62,12 @@ pub fn average(phases: &[WeightedPhase<'_>]) -> Result<MnaSystem, AveragingError
         initial_conditions: Vec::new(),
         parameter_defaults,
         warnings,
+        // Dropped for the same reason, and one of its own. Each phase is its own netlist, so
+        // carrying one phase's annotations would pick a phase arbitrarily and carrying all of
+        // them would report every component once per phase. Nor would either be useful: an
+        // annotation is read by something watching a run — a rating is exceeded at an instant
+        // — and an averaged model is a steady-state description rather than a run.
+        annotations: Vec::new(),
     })
 }
 

@@ -1,10 +1,10 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
 
 use general_spice_core::ast::{ElementInstance, Statement};
 use general_spice_core::{lexer, parser, Dialect};
 
-use crate::{Expression, InitialCondition, Matrix, MnaSystem, TransientFunction};
+use crate::{DeviceAnnotation, Expression, InitialCondition, Matrix, MnaSystem, TransientFunction};
 
 /// Treatment of parsed devices for which this linear MNA crate has no stamp.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,6 +35,20 @@ pub struct BuildOptions {
     pub on_resistance: Expression,
     /// Resistance used for switches in the off state.
     pub off_resistance: Expression,
+    /// Field names the caller owns, accepted on any device card, carried through to
+    /// [`MnaSystem::annotations`] verbatim and never stamped.
+    ///
+    /// Empty by default, which is exactly today's behaviour: an unregistered `key=value`
+    /// token is still rejected by [`validate_trailing_fields`], with the same message. A
+    /// registered name is accepted on *every* device letter, because the thing being
+    /// annotated is the component, not a particular stamp.
+    ///
+    /// Registration rather than a list of known rating names: `i_max` is a current limit to
+    /// a converter simulator and would be something else to the next consumer, so a name
+    /// baked in here would make a stamping library the owner of someone else's vocabulary,
+    /// and every new annotation would need a release of this crate before a netlist could
+    /// use it. Names are compared case-insensitively, like every other field.
+    pub annotation_fields: BTreeSet<String>,
 }
 
 impl Default for BuildOptions {
@@ -44,6 +58,7 @@ impl Default for BuildOptions {
             switch_states: BTreeMap::new(),
             on_resistance: Expression::symbol("Ron"),
             off_resistance: Expression::symbol("Roff"),
+            annotation_fields: BTreeSet::new(),
         }
     }
 }
@@ -53,6 +68,13 @@ impl BuildOptions {
     pub fn set_switch(&mut self, element_name: impl Into<String>, state: SwitchState) {
         self.switch_states
             .insert(normalize(&element_name.into()), state);
+    }
+
+    /// Registers a field name this crate will accept on any device card and hand back
+    /// through [`MnaSystem::annotations`] without interpreting it.
+    pub fn annotate(&mut self, field: impl AsRef<str>) {
+        self.annotation_fields
+            .insert(field.as_ref().to_ascii_lowercase());
     }
 }
 
@@ -138,7 +160,7 @@ impl MnaBuilder {
                 None => None,
             };
             if let Some(grammar) = grammar {
-                validate_trailing_fields(element, grammar)?;
+                validate_trailing_fields(element, grammar, &self.options.annotation_fields)?;
             }
         }
 
@@ -242,6 +264,44 @@ impl MnaBuilder {
                 // Unreachable: `accepted_fields` only offers `ic` on `C`/`L`, so any other
                 // letter carrying one was already rejected by `validate_trailing_fields`.
                 _ => unreachable!("ic= accepted only on C and L"),
+            }
+        }
+
+        // Registered annotations, collected for every element whatever its letter and
+        // whatever its grammar, and deliberately independent of stamping: nothing below
+        // reads `annotations`, and no annotation reaches `a`/`k`/`b`/`u`. Netlist order,
+        // and card order within a line, so a report can point at them in the order a
+        // reader wrote them.
+        let mut annotations = Vec::new();
+        if !self.options.annotation_fields.is_empty() {
+            for element in &elements {
+                for token in &element.raw_params {
+                    let Some((key, value)) = as_field(token) else {
+                        continue;
+                    };
+                    if !self.options.annotation_fields.contains(&key) {
+                        continue;
+                    }
+                    // A field this crate stamps is never an annotation, even when the caller
+                    // registered its name. `validate_trailing_fields` checks `accepted` first
+                    // for the same reason, and the two must agree: without this, a registered
+                    // `ic` became an initial condition *and* an annotation, and a consumer
+                    // reading the annotations would have seen a rating that was really a
+                    // starting value.
+                    if accepted_fields(element.device_letter)
+                        .iter()
+                        .any(|stamped| *stamped == key)
+                    {
+                        continue;
+                    }
+                    annotations.push(DeviceAnnotation {
+                        element: element.name.clone(),
+                        device_letter: element.device_letter,
+                        key,
+                        value: value.to_string(),
+                        line: element.span.start,
+                    });
+                }
             }
         }
 
@@ -371,6 +431,7 @@ impl MnaBuilder {
             initial_conditions,
             parameter_defaults,
             warnings,
+            annotations,
         })
     }
 
@@ -753,6 +814,7 @@ fn as_field(token: &str) -> Option<(String, &str)> {
 fn validate_trailing_fields(
     element: &ElementInstance,
     grammar: PositionalGrammar,
+    annotation_fields: &BTreeSet<String>,
 ) -> Result<(), BuildError> {
     let letter = element.device_letter;
     let accepted = accepted_fields(letter);
@@ -764,6 +826,13 @@ fn validate_trailing_fields(
             continue;
         };
         if accepted.iter().any(|allowed| *allowed == key) {
+            continue;
+        }
+        // A field the caller registered through `BuildOptions::annotate`. Accepted on any
+        // device letter and collected into `MnaSystem::annotations`; this crate never reads
+        // its value. Checked after `accepted` so a stamped field can never be shadowed by a
+        // registration — `ic` on a capacitor stays an initial condition.
+        if annotation_fields.contains(&key) {
             continue;
         }
         return Err(BuildError::InvalidElementField {

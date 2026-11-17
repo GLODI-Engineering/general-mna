@@ -1008,3 +1008,142 @@ fn a_nodeset_is_reported_as_having_no_effect() {
         system.warnings[0]
     );
 }
+
+// ---------------------------------------------------------------------------------------------
+// Registered annotations: fields the caller owns, carried through and never stamped. See #25.
+// ---------------------------------------------------------------------------------------------
+
+/// Builds with a set of annotation fields registered, the way a consumer that owns a rating
+/// vocabulary does.
+fn build_with_annotations(source: &str, fields: &[&str]) -> general_mna::MnaSystem {
+    let mut options = BuildOptions::default();
+    for field in fields {
+        options.annotate(field);
+    }
+    MnaBuilder::with_options(Dialect::Ngspice, options)
+        .build_fragment(source)
+        .unwrap()
+}
+
+#[test]
+fn an_unregistered_field_is_still_rejected_exactly_as_before() {
+    // The whole point of the registration: nothing is accepted by default, so the check that
+    // stops a typo simulating a circuit nobody wrote keeps working.
+    let error = build_error("V1 a 0 10\nL1 a 0 36u i_max=60\n");
+    assert_eq!(
+        error.to_string(),
+        "line 2: device 'L1' unknown field 'i_max' (device L accepts only: ic)"
+    );
+}
+
+#[test]
+fn a_registered_field_is_accepted_and_handed_back_verbatim() {
+    let system = build_with_annotations(
+        "V1 a 0 10\nLs a 0 36u i_max=60 i_sat=70 on_violation=console\n",
+        &["i_max", "i_sat", "on_violation"],
+    );
+
+    let got: Vec<(&str, &str, &str)> = system
+        .annotations
+        .iter()
+        .map(|a| (a.element.as_str(), a.key.as_str(), a.value.as_str()))
+        .collect();
+    assert_eq!(
+        got,
+        vec![
+            ("Ls", "i_max", "60"),
+            ("Ls", "i_sat", "70"),
+            ("Ls", "on_violation", "console"),
+        ]
+    );
+}
+
+#[test]
+fn an_annotation_carries_the_letter_and_the_line_it_was_written_on() {
+    let system = build_with_annotations("V1 a 0 10\nR1 a b 1\nL1 b 0 36u i_max=60\n", &["i_max"]);
+    let annotation = &system.annotations[0];
+    assert_eq!(annotation.element, "L1");
+    assert_eq!(annotation.device_letter, 'L');
+    assert_eq!(annotation.line, 3);
+}
+
+#[test]
+fn an_annotation_does_not_change_a_single_equation() {
+    // The claim that matters: a rating is a statement about the component, not about the
+    // circuit. The two systems must be identical everywhere but `annotations`.
+    let plain = MnaBuilder::new(Dialect::Ngspice)
+        .build_fragment("V1 a 0 10\nR1 a b 2\nL1 b 0 36u\nC1 b 0 1u\n")
+        .unwrap();
+    let annotated = build_with_annotations(
+        "V1 a 0 10\nR1 a b 2\nL1 b 0 36u i_max=60\nC1 b 0 1u v_max=400\n",
+        &["i_max", "v_max"],
+    );
+
+    assert_eq!(annotated.a, plain.a);
+    assert_eq!(annotated.k, plain.k);
+    assert_eq!(annotated.b, plain.b);
+    assert_eq!(annotated.u, plain.u);
+    assert_eq!(annotated.unknowns, plain.unknowns);
+    assert_eq!(annotated.inputs, plain.inputs);
+    assert_eq!(annotated.input_values, plain.input_values);
+    assert_eq!(annotated.initial_conditions, plain.initial_conditions);
+    assert_eq!(annotated.parameter_defaults, plain.parameter_defaults);
+    assert_eq!(annotated.warnings, plain.warnings);
+
+    assert!(plain.annotations.is_empty());
+    assert_eq!(annotated.annotations.len(), 2);
+}
+
+#[test]
+fn registering_a_stamped_field_cannot_shadow_it() {
+    // `ic` is checked against `accepted_fields` first, so a caller that registers the name by
+    // accident still gets an initial condition rather than an annotation. The alternative —
+    // registration winning — would silently start a run from rest.
+    let system = build_with_annotations("V1 a 0 10\nC1 a 0 1u ic=5\n", &["ic"]);
+    assert_eq!(system.initial_conditions.len(), 1);
+    assert!(
+        system.annotations.is_empty(),
+        "ic was taken as an annotation: {:?}",
+        system.annotations
+    );
+}
+
+#[test]
+fn an_annotation_is_accepted_on_any_device_letter() {
+    // The thing annotated is the component, so the letter is not this crate's business. `R`
+    // accepts no fields at all today, which makes it the strongest case.
+    let system = build_with_annotations("V1 a 0 10 part=LM317\nR1 a 0 50 part=RC0603\n", &["part"]);
+    let letters: Vec<char> = system.annotations.iter().map(|a| a.device_letter).collect();
+    assert_eq!(letters, vec!['V', 'R']);
+}
+
+#[test]
+fn an_annotation_field_name_is_case_insensitive_like_every_other_field() {
+    let system = build_with_annotations("V1 a 0 10\nL1 a 0 36u I_MAX=60\n", &["i_max"]);
+    assert_eq!(system.annotations[0].key, "i_max");
+    assert_eq!(system.annotations[0].value, "60");
+}
+
+#[test]
+fn an_annotation_value_keeps_its_suffix_and_is_not_parsed() {
+    // Values stay strings on purpose: a rating may be a number, a suffixed number, or an
+    // enum, and this crate has no way to know which. Parsing belongs to the registrant.
+    let system = build_with_annotations(
+        "V1 a 0 10\nL1 a 0 36u i_max=60m on_violation=stop\n",
+        &["i_max", "on_violation"],
+    );
+    let values: Vec<&str> = system
+        .annotations
+        .iter()
+        .map(|a| a.value.as_str())
+        .collect();
+    assert_eq!(values, vec!["60m", "stop"]);
+}
+
+#[test]
+fn registering_nothing_leaves_a_netlist_without_annotations() {
+    let system = MnaBuilder::new(Dialect::Ngspice)
+        .build_fragment("V1 a 0 10\nR1 a 0 1\n")
+        .unwrap();
+    assert!(system.annotations.is_empty());
+}

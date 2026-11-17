@@ -47,6 +47,6 @@ pub use numeric::{
 pub use symbolic::{
     faddeev_leverrier, SymbolicStateSpace, SymbolicTransferFunction, TransferFunctionError,
 };
-pub use system::{InitialCondition, MnaSystem, StringMnaSystem};
+pub use system::{DeviceAnnotation, InitialCondition, MnaSystem, StringMnaSystem};
 pub use system_builder::{build_system, parse_and_flatten, System};
 pub use transient_source::{PwlPoints, TransientFunction};
