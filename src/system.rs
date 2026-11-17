@@ -97,6 +97,39 @@ pub struct MnaSystem {
     pub parameter_defaults: BTreeMap<String, Expression>,
     /// Non-fatal build messages, primarily for deliberately ignored elements.
     pub warnings: Vec<String>,
+    /// Every `key=value` field on a device card whose name the caller registered through
+    /// [`BuildOptions::annotate`](crate::BuildOptions::annotate), in netlist order.
+    ///
+    /// Like [`Self::initial_conditions`] these are *not* folded into `a`/`k`/`b`/`u`, and for
+    /// a stronger reason: an initial condition at least constrains `x`, whereas an annotation
+    /// says nothing about the circuit at all. It is a statement about the component — a
+    /// current rating, a part number, what to do when a limit is exceeded — carried from the
+    /// netlist to whoever asked for it.
+    ///
+    /// This crate does not interpret a single one of them. Values stay as written, because a
+    /// rating may be a number, an enum or a name, and parsing it belongs to the caller that
+    /// registered the field. Empty for a netlist that declares none, which is every netlist
+    /// built by a caller that registered nothing.
+    pub annotations: Vec<DeviceAnnotation>,
+}
+
+/// One registered `key=value` field read off a device card and carried through unexamined.
+///
+/// See [`MnaSystem::annotations`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeviceAnnotation {
+    /// The annotated element's name, as the netlist spells it (dotted-path-resolved when the
+    /// card came from inside a `.subckt`, like every other name this crate reports).
+    pub element: String,
+    /// Its SPICE device letter, so a consumer can tell an inductor's rating from a switch's
+    /// without re-parsing the deck.
+    pub device_letter: char,
+    /// The field name, lowercased — fields are case-insensitive in every SPICE dialect.
+    pub key: String,
+    /// The value exactly as written, including its suffix: `60`, `36u`, `console`.
+    pub value: String,
+    /// Line the card starts on, for a diagnostic that points at the netlist.
+    pub line: usize,
 }
 
 impl MnaSystem {
