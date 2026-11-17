@@ -832,6 +832,25 @@ fn v_th_on_a_switch_is_refused_and_names_both_things_it_could_have_meant() {
 }
 
 #[test]
+fn a_renamed_field_message_reads_as_one_sentence() {
+    // The message is built from a multi-line Rust string, and `cargo fmt` once collapsed the
+    // line continuation into a run of literal spaces -- shipping an error that read
+    // "no longer exists -- write                  'v_f'". A user-facing message is part of the
+    // interface, so its shape is pinned rather than left to the formatter.
+    let err = build_system(
+        "V1 a 0 5\nR1 a b 1\nD1 b 0 dmodel\n\
+         D1 kind=ideal_diode g_breakdown=0 v_breakdown=-100 g_off=0 v_th=0.7 g_on=1\n",
+        Dialect::Ngspice,
+    )
+    .unwrap_err();
+    assert!(
+        !err.contains("  "),
+        "the message should not carry a run of spaces from a line continuation: {err:?}"
+    );
+    assert!(err.contains("write 'v_f'"), "{err}");
+}
+
+#[test]
 fn v_th_on_a_diode_is_refused_and_names_v_f() {
     let err = build_system(
         "V1 a 0 5\nR1 a b 1\nD1 b 0 dmodel\n\
