@@ -305,6 +305,16 @@ impl Fields {
         self.get(key).is_some()
     }
 
+    /// Whether `key` is present, **without** marking it as a field this kind accepts.
+    ///
+    /// Needed only for the renamed-field checks. Those have to ask "did the deck use the old
+    /// spelling?", and asking through [`Self::get`] marks the old name as looked up -- which put
+    /// `v_th` into the "accepts only: ..." list of the very error that rejects it. A rejected
+    /// name must not appear in the list of names a kind accepts.
+    fn present_unread(&self, key: &str) -> bool {
+        self.map.contains_key(key)
+    }
+
     /// The first field (in key order) present on the line that no parser ever looked up, and
     /// the sorted list of every key that was looked up (the line's own `kind=` excluded from
     /// both) for the error message.
@@ -632,25 +642,85 @@ fn build_kind(stmt: &general_spice_core::ast::BlockInstance) -> Result<Kind, Str
         })
     };
 
+    // Field names a reader could take two ways are refused rather than reinterpreted. The
+    // vocabulary rule is that a name says which device owns the parameter and uses that device's
+    // own datasheet word for the quantity -- so a diode's forward threshold is `v_f` ($V_F$), and
+    // on a switch every body-diode field carries `body_`. `v_th` is gone from the language in
+    // both places, because in power electronics it means the MOSFET gate threshold
+    // ($V_{GS(th)}$) and nothing else, and on a `kind=ideal_switch` line it used to mean the body
+    // diode's forward drop. Writing `v_th=5` for a 5 V gate produced a switch that still turned
+    // on at 0.5 *and* a body diode with a 5 V forward drop: a valid deck, a completed run, and a
+    // converter whose freewheeling path had silently changed.
+    //
+    // Hard errors, never accepted aliases: an alias is how a double meaning survives a rename.
+    // `present_unread` rather than `get`: a rejected spelling must not end up in the
+    // "accepts only: ..." list of the error that rejects it, which is what happened first time.
+    let renamed = |old: &str, replacement: &str, why: &str| -> Option<String> {
+        fields.present_unread(old).then(|| {
+            format!(
+                "line {}: device '{name}' field '{old}' no longer exists -- write                  '{replacement}'. {why}",
+                line_number + 1
+            )
+        })
+    };
+
     let kind = fields
         .get("kind")
         .map(String::as_str)
         .unwrap_or("ideal_diode");
     let entry = match kind {
-        "ideal_diode" => Kind::IdealDiode(IdealDiode::new(
-            get("g_breakdown")?,
-            get("v_breakdown")?,
-            get("g_off")?,
-            get("v_th")?,
-            get("g_on")?,
-        )),
-        "ideal_switch" => {
-            let body_diode = IdealDiode::new(
+        "ideal_diode" => {
+            if let Some(message) = renamed(
+                "v_th",
+                "v_f",
+                "A diode's forward threshold is $V_F$ on every datasheet; `v_th` means the \
+                 MOSFET gate threshold and belongs to no diode.",
+            ) {
+                return Err(message);
+            }
+            Kind::IdealDiode(IdealDiode::new(
                 get("g_breakdown")?,
                 get("v_breakdown")?,
                 get("g_off")?,
-                get("v_th")?,
+                get("v_f")?,
                 get("g_on")?,
+            ))
+        }
+        "ideal_switch" => {
+            if let Some(message) = renamed(
+                "v_th",
+                "body_v_f",
+                "On a switch this field was never the gate threshold: it is the body diode's \
+                 forward voltage, and the gate path never read it. If you meant the gate \
+                 threshold, that is 'v_gs_th' and it defaults to 0.5.",
+            ) {
+                return Err(message);
+            }
+            // The other four body-diode fields, which were spelled exactly as a standalone
+            // diode's. Prefixed now so that reading a switch line says which of its two devices
+            // each number describes.
+            for (old, replacement) in [
+                ("g_on", "body_g_on"),
+                ("g_off", "body_g_off"),
+                ("v_breakdown", "body_v_breakdown"),
+                ("g_breakdown", "body_g_breakdown"),
+            ] {
+                if let Some(message) = renamed(
+                    old,
+                    replacement,
+                    "On a switch, every field describing the body diode carries the `body_` \
+                     prefix; `r_on` stays bare because it is the channel, which is the switch's \
+                     own.",
+                ) {
+                    return Err(message);
+                }
+            }
+            let body_diode = IdealDiode::new(
+                get("body_g_breakdown")?,
+                get("body_v_breakdown")?,
+                get("body_g_off")?,
+                get("body_v_f")?,
+                get("body_g_on")?,
             );
             let r_on = get("r_on")?;
             // Every gate is block-driven -- gate=block ctrl=<name>, reading that block's
@@ -659,8 +729,17 @@ fn build_kind(stmt: &general_spice_core::ast::BlockInstance) -> Result<Kind, Str
             // `kind=sig2phys domain=voltage` (an ideal switch's gate is itself a voltage, the
             // same Signal-to-PS boundary a V-source's own magnitude uses -- no dedicated
             // gate-only converter).
+            // Optional, defaulting to the 0.5 this was hard-coded to before the field existed,
+            // so every deck written against the old language keeps its exact behaviour.
+            let v_gs_th = match fields.get("v_gs_th") {
+                None => 0.5,
+                Some(_) => get("v_gs_th")?,
+            };
             let gate = match fields.get("gate").map(String::as_str) {
-                Some("block") => GateBinding::Block(get_str("ctrl")?),
+                Some("block") => GateBinding::Block {
+                    ctrl: get_str("ctrl")?,
+                    v_gs_th,
+                },
                 Some(other) => {
                     return Err(format!(
                         "line {}: unknown gate spec '{other}' (only gate=block ctrl=<name> \

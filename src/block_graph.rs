@@ -2256,7 +2256,8 @@ pub enum BlockKind {
     /// Also the *only* legal target for a [`GateBinding::Block`]'s own named block, and there
     /// *only* the `domain=voltage` form — `dae-runtime` rejects a `GateBinding` naming anything
     /// else, including a `domain=current` `Sig2Phys`, with `DaeError::GateTargetNotSig2Voltage`.
-    /// An ideal switch's gate is itself a voltage (`V_GS` against `v_th`), not a distinct
+    /// An ideal switch's gate is itself a voltage (`V_GS` against the gate's own
+    /// `v_gs_th`), not a distinct
     /// discrete-actuation signal domain, so there is no separate gate-only converter — one type,
     /// `Sig2Phys`, parameterized by [`PhysicalDomain`], is the whole Signal-to-PS boundary for
     /// "a signal-domain block's output drives a physical voltage or current," whether that
@@ -2412,13 +2413,19 @@ pub enum GateBinding {
     /// ## Description
     /// This is not a `kind=` block itself — it's the `gate=`/`ctrl=` field pair on a
     /// `kind=ideal_switch` device line. `GateBinding` has exactly one variant and exactly one
-    /// job: reading a named block's current output and thresholding it at `>= 0.5`. No
+    /// job: reading a named block's current output and thresholding it at `>= v_gs_th`. No
     /// non-block-driven variant exists — even a permanently-off gate is an explicit `Const(0.0)`
     /// wired through a `domain=voltage` [`BlockKind::Sig2Phys`], the same as every other gate.
     /// The named block (`ctrl=`) must itself be a `domain=voltage` [`BlockKind::Sig2Phys`] — an
-    /// ideal switch's gate is itself a voltage ($V_{GS}$ against $v_{th}$), not a distinct
+    /// ideal switch's gate is itself a voltage ($V_{GS}$, compared against this binding's
+    /// own `v_gs_th`), not a distinct
     /// discrete-actuation signal domain (and never `domain=current`, even though `Sig2Phys`
     /// itself allows that domain for `I`-source targets).
+    ///
+    /// This comment used to say the gate was compared against `v_th`, which was **false**:
+    /// `v_th` on a `kind=ideal_switch` line is the *body diode's* forward threshold and the
+    /// gate path never read it. The comparison was a hard-coded `0.5`. That is the double
+    /// meaning `v_gs_th` and the `body_` prefix exist to remove.
     ///
     /// ## Parameters
     /// - `gate=block` — the only accepted value; every gate is block-driven.
@@ -2436,8 +2443,9 @@ pub enum GateBinding {
     ///
     /// ## Netlist form
     /// ```text
-    /// NAME kind=ideal_switch r_on=<f64> g_breakdown=<f64> v_breakdown=<f64> g_off=<f64> \
-    ///      v_th=<f64> g_on=<f64> gate=block ctrl=<sig2phys_voltage_block_name>
+    /// NAME kind=ideal_switch r_on=<f64> body_g_breakdown=<f64> body_v_breakdown=<f64> \
+    ///      body_g_off=<f64> \
+    ///      body_v_f=<f64> body_g_on=<f64> gate=block ctrl=<name> [v_gs_th=<f64>]
     /// ```
     ///
     /// ## Example
@@ -2452,20 +2460,36 @@ pub enum GateBinding {
     /// ONGATE kind=sig2phys domain=voltage in=ONVAL
     /// V1 in 0 5
     /// D1 in out idealswitchmodel
-    /// D1 kind=ideal_switch r_on=0.1 g_breakdown=0 v_breakdown=-100 g_off=0 v_th=0.5 g_on=5 \
+    /// D1 kind=ideal_switch r_on=0.1 body_g_breakdown=0 body_v_breakdown=-100 body_g_off=0 \
+    ///      body_v_f=0.5 body_g_on=5 \
     ///      gate=block ctrl=ONGATE
     /// R1 out 0 1k
     /// ```
     ///
-    /// On while the named block's current output is `>= 0.5`.
-    Block(String),
+    /// On while the named block's current output is at or above `v_gs_th`.
+    Block {
+        /// The named block whose output drives this gate.
+        ctrl: String,
+        /// The gate threshold, datasheet $V_{GS(th)}$. Defaults to `0.5`.
+        ///
+        /// This field closes a trap rather than adding a knob. Before it, the comparison was a
+        /// hard-coded `0.5` and the language had nowhere to put a real gate threshold -- so
+        /// anyone modelling a device with a 5 V gate reached for the nearest-looking name,
+        /// `v_th`, which was the *body diode's* forward threshold. The deck stayed valid, the run
+        /// completed, and the converter's freewheeling path silently acquired a 5 V diode drop.
+        ///
+        /// With `v_gs_th` honoured here the obvious thing to write is also the correct thing, and
+        /// no body-diode field is a candidate. The `0.5` default leaves every deck written before
+        /// this field existed behaving identically.
+        v_gs_th: f64,
+    },
 }
 
 impl GateBinding {
     /// The block this binding reads from.
     pub fn source_blocks(&self) -> [Option<&str>; 2] {
         match self {
-            GateBinding::Block(name) => [Some(name), None],
+            GateBinding::Block { ctrl, .. } => [Some(ctrl), None],
         }
     }
 
@@ -2478,14 +2502,17 @@ impl GateBinding {
     /// this variant existed (equally unreachable, for the same "checked before any step runs"
     /// reason).
     pub fn resolve(&self, outputs: &BTreeMap<String, SignalValue>) -> SwitchState {
-        let GateBinding::Block(name) = self;
+        let GateBinding::Block {
+            ctrl: name,
+            v_gs_th,
+        } = self;
         let value = outputs[name.as_str()].as_scalar().unwrap_or_else(|| {
             panic!(
                 "gate '{name}' resolved to a vector signal -- unreachable, since Sig2Phys \
                  itself must already reject a vector input"
             )
         });
-        if value >= 0.5 {
+        if value >= *v_gs_th {
             SwitchState::On
         } else {
             SwitchState::Off

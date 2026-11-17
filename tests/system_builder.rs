@@ -65,8 +65,8 @@ fn an_ideal_switch_line_correlates_by_name_with_its_block_gate() {
     let source = "V1 vin 0 400\nD1 vin vx idealswitchmodel\nR1 vx 0 1000\n\
                   OFFVAL kind=const value=0\n\
                   OFFGATE kind=sig2phys domain=voltage in=OFFVAL\n\
-                  D1 kind=ideal_switch r_on=0.01 g_breakdown=0 v_breakdown=-1e6 g_off=1e-6 \
-                  v_th=1e6 g_on=0 gate=block ctrl=OFFGATE\n";
+                  D1 kind=ideal_switch r_on=0.01 body_g_breakdown=0 body_v_breakdown=-1e6 \
+                  body_g_off=1e-6 body_v_f=1e6 body_g_on=0 gate=block ctrl=OFFGATE\n";
     let System {
         ideal_switches,
         gates,
@@ -78,7 +78,12 @@ fn an_ideal_switch_line_correlates_by_name_with_its_block_gate() {
     assert_eq!(shared_r_on, 0.01);
     assert_eq!(
         gates.get("D1"),
-        Some(&GateBinding::Block("OFFGATE".to_string()))
+        Some(&GateBinding::Block {
+            ctrl: "OFFGATE".to_string(),
+            // Not written in the deck, so the default stands: the 0.5 this was hard-coded to
+            // before the field existed.
+            v_gs_th: 0.5,
+        })
     );
     assert_eq!(blocks.len(), 2); // OFFVAL, OFFGATE (D1 itself became an ideal switch+gate, not a block)
 }
@@ -86,10 +91,10 @@ fn an_ideal_switch_line_correlates_by_name_with_its_block_gate() {
 #[test]
 fn mismatched_ideal_switch_r_on_is_a_clear_error() {
     let source = "D1 a b m1\nD2 c d m2\n\
-                  D1 kind=ideal_switch r_on=0.01 g_breakdown=0 v_breakdown=-100 g_off=0 v_th=1 \
-                  g_on=1 gate=block ctrl=G\n\
-                  D2 kind=ideal_switch r_on=0.05 g_breakdown=0 v_breakdown=-100 g_off=0 v_th=1 \
-                  g_on=1 gate=block ctrl=G\n";
+                  D1 kind=ideal_switch r_on=0.01 body_g_breakdown=0 body_v_breakdown=-100 body_g_off=0 \
+                  body_v_f=1 body_g_on=1 gate=block ctrl=G\n\
+                  D2 kind=ideal_switch r_on=0.05 body_g_breakdown=0 body_v_breakdown=-100 body_g_off=0 \
+                  body_v_f=1 body_g_on=1 gate=block ctrl=G\n";
     let err = build_system(source, Dialect::Ngspice).unwrap_err();
     assert!(err.contains("same r_on"), "unexpected error: {err}");
 }
@@ -572,12 +577,12 @@ fn an_unknown_field_on_a_block_is_rejected_not_dropped() {
     // Not only `Kind::Block` lines: the PWL device kinds go through the same check.
     let err = build_error(
         "V1 a 0 1\nR1 a b 1\nD1 b 0 1\nD1 kind=ideal_diode g_breakdown=0 v_breakdown=-100 \
-         g_off=0 v_th=0.5 g_on=5 area=2\n",
+         g_off=0 v_f=0.5 g_on=5 area=2\n",
     );
     assert_eq!(
         err,
         "line 4: device 'D1' unknown field 'area' (kind=ideal_diode accepts only: g_breakdown, \
-         g_off, g_on, v_breakdown, v_th)"
+         g_off, g_on, v_breakdown, v_f)"
     );
     // A field that merely looks plausible (`gain=` next to the real `k=`) is still unknown.
     let err = build_error("G kind=gain in=U k=2 gain=2\nU kind=const value=1\n");
@@ -782,5 +787,161 @@ fn a_dot_ic_on_an_unknown_subckt_node_still_errors_with_the_mangled_name() {
     assert_eq!(
         err,
         "line 4: .IC 'I(X1.L9)' names element 'X1.L9', which this netlist does not declare"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Unambiguous device parameter names
+// ---------------------------------------------------------------------------
+
+/// A one-switch deck in the current vocabulary, with `v_gs_th` left to its default.
+fn switch_deck(extra: &str) -> String {
+    format!(
+        "V1 vin 0 12\nD1 vin vx idealswitchmodel\nR1 vx 0 10\n\
+         DUTY kind=const value=1\n\
+         G kind=sig2phys domain=voltage in=DUTY\n\
+         D1 kind=ideal_switch r_on=0.01 body_g_breakdown=0 body_v_breakdown=-100 \
+         body_g_off=0 body_v_f=0.5 body_g_on=5 gate=block ctrl=G{extra}\n"
+    )
+}
+
+#[test]
+fn v_th_on_a_switch_is_refused_and_names_both_things_it_could_have_meant() {
+    // The whole point of the rename. `v_th=5` written for a 5 V gate used to be accepted: the
+    // switch still turned on at 0.5 *and* the body diode acquired a 5 V forward drop, silently
+    // changing how the converter freewheeled. The error has to name both replacements, because
+    // only the author knows which they meant.
+    let err = build_system(
+        &switch_deck("").replace("body_v_f=0.5", "v_th=5"),
+        Dialect::Ngspice,
+    )
+    .unwrap_err();
+    assert!(err.contains("field 'v_th' no longer exists"), "{err}");
+    assert!(
+        err.contains("body_v_f"),
+        "must name the body diode's field: {err}"
+    );
+    assert!(
+        err.contains("v_gs_th"),
+        "must name the gate threshold too: {err}"
+    );
+    assert!(
+        err.contains("never the gate threshold"),
+        "must say what it actually meant: {err}"
+    );
+}
+
+#[test]
+fn v_th_on_a_diode_is_refused_and_names_v_f() {
+    let err = build_system(
+        "V1 a 0 5\nR1 a b 1\nD1 b 0 dmodel\n\
+         D1 kind=ideal_diode g_breakdown=0 v_breakdown=-100 g_off=0 v_th=0.7 g_on=1\n",
+        Dialect::Ngspice,
+    )
+    .unwrap_err();
+    assert!(err.contains("field 'v_th' no longer exists"), "{err}");
+    assert!(err.contains("'v_f'"), "{err}");
+    assert!(
+        err.contains("$V_F$"),
+        "must say why v_f is the right word: {err}"
+    );
+}
+
+#[test]
+fn a_bare_body_diode_field_on_a_switch_is_refused_and_names_the_prefixed_one() {
+    // All four of the others, because a deck half-converted is the dangerous state: the four
+    // bare spellings were valid before and mean the body diode, so accepting any of them while
+    // rejecting `v_th` would leave the ambiguity in place for the rest of the group.
+    for (bare, prefixed) in [
+        ("g_on=5", "body_g_on"),
+        ("g_off=0", "body_g_off"),
+        ("v_breakdown=-100", "body_v_breakdown"),
+        ("g_breakdown=0", "body_g_breakdown"),
+    ] {
+        let deck = switch_deck("").replace(&format!("body_{bare}"), bare);
+        let err = build_system(&deck, Dialect::Ngspice).unwrap_err();
+        assert!(
+            err.contains(&format!(
+                "field '{}' no longer exists",
+                bare.split('=').next().unwrap()
+            )),
+            "{bare} should be refused: {err}"
+        );
+        assert!(err.contains(prefixed), "should name {prefixed}: {err}");
+        assert!(
+            err.contains("`r_on` stays bare"),
+            "should say why r_on is the exception: {err}"
+        );
+    }
+}
+
+#[test]
+fn a_rejected_spelling_is_not_listed_among_the_fields_the_kind_accepts() {
+    // A first version asked "is `v_th` present?" through the lookup that also records which
+    // fields a kind accepts, so the error rejecting `v_th` listed `v_th` as accepted. A name the
+    // parser refuses must never appear in its own "accepts only" list.
+    let err = build_system(
+        "V1 a 0 5\nR1 a b 1\nD1 b 0 dmodel\n\
+         D1 kind=ideal_diode g_breakdown=0 v_breakdown=-100 g_off=0 v_f=0.7 g_on=1 area=2\n",
+        Dialect::Ngspice,
+    )
+    .unwrap_err();
+    assert!(err.contains("unknown field 'area'"), "{err}");
+    assert!(err.contains("v_f"), "{err}");
+    assert!(
+        !err.contains("v_th"),
+        "a refused spelling must not be advertised as accepted: {err}"
+    );
+}
+
+#[test]
+fn v_gs_th_defaults_to_the_value_the_comparison_was_hard_coded_to() {
+    // Every deck written before this field existed has to keep behaving identically.
+    let System { gates, .. } = build_system(&switch_deck(""), Dialect::Ngspice).unwrap();
+    assert_eq!(
+        gates.get("D1"),
+        Some(&GateBinding::Block {
+            ctrl: "G".to_string(),
+            v_gs_th: 0.5,
+        })
+    );
+}
+
+#[test]
+fn v_gs_th_is_the_value_the_gate_is_actually_compared_against() {
+    // The field has to *do* something, or it is a second trap rather than the cure for the
+    // first one. Same gate signal, two thresholds, opposite switch states.
+    use general_mna::SwitchState;
+    use std::collections::BTreeMap;
+
+    let outputs: BTreeMap<String, general_mna::block_graph::SignalValue> = BTreeMap::from([(
+        "G".to_string(),
+        general_mna::block_graph::SignalValue::Scalar(1.0),
+    )]);
+    let low = GateBinding::Block {
+        ctrl: "G".to_string(),
+        v_gs_th: 0.5,
+    };
+    let high = GateBinding::Block {
+        ctrl: "G".to_string(),
+        v_gs_th: 5.0,
+    };
+    assert_eq!(low.resolve(&outputs), SwitchState::On);
+    assert_eq!(
+        high.resolve(&outputs),
+        SwitchState::Off,
+        "a 1 V gate signal must not turn on a switch whose threshold is 5 V"
+    );
+}
+
+#[test]
+fn v_gs_th_is_read_from_the_deck() {
+    let System { gates, .. } = build_system(&switch_deck(" v_gs_th=5"), Dialect::Ngspice).unwrap();
+    assert_eq!(
+        gates.get("D1"),
+        Some(&GateBinding::Block {
+            ctrl: "G".to_string(),
+            v_gs_th: 5.0,
+        })
     );
 }
