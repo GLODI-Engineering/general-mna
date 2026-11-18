@@ -39,6 +39,29 @@ artifacts/    generated TeX/PDF reports
 docs/         architecture, journal, gotchas, and verification records
 ```
 
+## Development cycle
+
+The gates below say how code is written. This says how the work is recorded, which matters for
+the same reason: someone reads it later, and what they can reconstruct is what was written down.
+
+1. **A large instruction becomes a milestone**, named for the outcome rather than the task
+   ("Rules and diagnostics", not "implement the rules spec").
+2. **One issue per deliverable phase or decision**, each stating the problem rather than the
+   patch. The instruction as a whole — its reasoning, what it leaves open — is an issue in that
+   milestone too, and the rest reference it with `Part of #N`.
+3. **A branch and a pull request per issue**, the description ending `Closes #N`, assigned to the
+   milestone. Nothing lands on the default branch directly.
+4. **The merge closes the issue.** Closing it by hand loses the link between the issue and the
+   commit that answered it, which is the whole point of the exercise.
+5. **Anything found but not done becomes its own issue**, not a sentence in a pull request body.
+   A merged pull request's prose is invisible; an open issue is not. A deliberate omission with
+   a reason is worth more than a half-finished corner of a change.
+6. **Gates run before pushing**, never after. A red branch spends someone's CI and tells the
+   reader the author did not look.
+
+Finish a repository's open pull request before starting new work in it, so review has one thing
+to hold at a time.
+
 ## Required gates
 
 Before committing, use the `commit` skill and run:
