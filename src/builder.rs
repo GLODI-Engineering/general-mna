@@ -150,6 +150,28 @@ impl MnaBuilder {
             })
             .collect();
 
+        // Every element name is unique, case-insensitively, whatever the device letter.
+        //
+        // Checked here, once, for all of them -- not as a side effect of building something
+        // keyed by name. Doing it the second way is how this escaped for so long: a duplicate
+        // `V`, `I`, `L`, `E`, `H` or `D` name collided in `inputs`/`branches` and was rejected,
+        // because those letters own an entry there, while two resistors or two capacitors
+        // stamped on top of each other in silence and produced a system that solves. The
+        // numbers that came out were even right, since stamping is positional and never looks
+        // a name up -- but every *reference* by name (a `kind=rule` card's `target=`, a
+        // `kind=measure`, a controlling branch, a `.IC`, a caller's `switch_states`, a GUI's
+        // highlight) then resolves to one of the two arbitrarily, and the author is never told
+        // that the other one exists.
+        let mut seen: HashMap<String, &str> = HashMap::new();
+        for element in &elements {
+            if seen
+                .insert(normalize(&element.name), element.name.as_str())
+                .is_some()
+            {
+                return Err(BuildError::DuplicateElement(element.name.clone()));
+            }
+        }
+
         for element in &elements {
             // A switch-assigned element is stamped as a plain on/off admittance whatever its
             // device letter, so its own positional grammar is not this crate's to enforce --
@@ -193,10 +215,8 @@ impl MnaBuilder {
         for element in &elements {
             if matches!(element.device_letter, 'V' | 'I') {
                 let column = inputs.len();
-                let key = normalize(&element.name);
-                if input_by_element.insert(key, column).is_some() {
-                    return Err(BuildError::DuplicateElement(element.name.clone()));
-                }
+                // Unique by the pass above, so this never overwrites a column.
+                input_by_element.insert(normalize(&element.name), column);
                 inputs.push(element.name.clone());
                 if let Some(transient_fn) = TransientFunction::parse_params(&element.raw_params) {
                     // A time-varying source is stamped as a named symbol, not a baked
@@ -218,10 +238,8 @@ impl MnaBuilder {
                 // piecewise-linear mode-selection, not by this crate. See `elspice-pwl`'s
                 // `docs/architecture.md` for why this is the right split of responsibility.
                 let column = inputs.len();
-                let key = normalize(&element.name);
-                if input_by_element.insert(key, column).is_some() {
-                    return Err(BuildError::DuplicateElement(element.name.clone()));
-                }
+                // Unique by the pass above, so this never overwrites a column.
+                input_by_element.insert(normalize(&element.name), column);
                 inputs.push(element.name.clone());
                 input_values.push(Expression::symbol(format!("{}_Ioff", element.name)));
             }
