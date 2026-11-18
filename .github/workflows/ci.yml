@@ -58,6 +58,28 @@ jobs:
           repository: GLODI-Engineering/gs-waveform-measurements
           path: gs-waveform-measurements
 
+      # A change that moves a version across a repository boundary cannot be green in
+      # either repository until it is green in both: this branch asks for a sibling
+      # version that exists only on the sibling's own branch -- this crate takes
+      # continuous-blocks and pwl-devices from general-simulator's workspace, so a
+      # version bump there has to be visible here. So when a sibling carries a branch of
+      # this one's name, test against that branch rather than its default branch;
+      # otherwise the two repositories deadlock and neither side can go first.
+      - name: Prefer sibling branches of the same name, when they exist
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        run: |
+          ref="${{ github.head_ref || github.ref_name }}"
+          for d in general-simulator spice-lsp gs-waveform-measurements; do
+            if git -C "$d" ls-remote --exit-code --heads origin "$ref" >/dev/null 2>&1; then
+              git -C "$d" fetch -q --depth 1 origin "$ref"
+              git -C "$d" checkout -q FETCH_HEAD
+              echo "$d: testing against branch $ref"
+            else
+              echo "$d: no branch $ref, using its default branch"
+            fi
+          done
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -113,6 +135,28 @@ jobs:
         with:
           repository: GLODI-Engineering/gs-waveform-measurements
           path: gs-waveform-measurements
+
+      # A change that moves a version across a repository boundary cannot be green in
+      # either repository until it is green in both: this branch asks for a sibling
+      # version that exists only on the sibling's own branch -- this crate takes
+      # continuous-blocks and pwl-devices from general-simulator's workspace, so a
+      # version bump there has to be visible here. So when a sibling carries a branch of
+      # this one's name, test against that branch rather than its default branch;
+      # otherwise the two repositories deadlock and neither side can go first.
+      - name: Prefer sibling branches of the same name, when they exist
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        run: |
+          ref="${{ github.head_ref || github.ref_name }}"
+          for d in general-simulator spice-lsp gs-waveform-measurements; do
+            if git -C "$d" ls-remote --exit-code --heads origin "$ref" >/dev/null 2>&1; then
+              git -C "$d" fetch -q --depth 1 origin "$ref"
+              git -C "$d" checkout -q FETCH_HEAD
+              echo "$d: testing against branch $ref"
+            else
+              echo "$d: no branch $ref, using its default branch"
+            fi
+          done
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
