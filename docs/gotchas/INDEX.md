@@ -4,4 +4,4 @@
 
 | ID | Title | Severity | Status | Scope | Discovered |
 |---|---|---|---|---|---|
-| _none yet_ | | | | | |
+| [GOTCHA-001](GOTCHA-001-duplicate-element-name-only-checked-for-unknown-bearing-letters.md) | GOTCHA-001 — A duplicate element name was rejected only when the name became an unknown | high | fixed | src/builder.rs | 2026-11-18 |

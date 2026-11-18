@@ -1147,3 +1147,92 @@ fn registering_nothing_leaves_a_netlist_without_annotations() {
         .unwrap();
     assert!(system.annotations.is_empty());
 }
+
+// --- Element names are unique, whatever the device letter -------------------------------------
+//
+// The bug these tests exist for: a duplicate name was caught only for the letters whose name
+// becomes an MNA unknown or an input column (`V`, `I`, `L`, `E`, `H`, `D`), because the
+// rejection was a side effect of inserting into `branches`/`inputs`. Two resistors of one name
+// were stamped on top of each other in silence. The *voltages* that came out were right --
+// stamping is positional and never looks a name up -- so nothing failed; what broke was every
+// later reference by name, which resolved to one of the two arbitrarily.
+
+#[test]
+fn two_resistors_of_one_name_are_rejected() {
+    let error = build_error("V1 a 0 10\nRload a b 10\nRload b 0 20\n");
+    assert_eq!(
+        error.to_string(),
+        "duplicate case-insensitive element name 'Rload'"
+    );
+}
+
+#[test]
+fn two_capacitors_of_one_name_are_rejected() {
+    let error = build_error("V1 a 0 10\nC1 a 0 1u\nC1 a 0 2u\n");
+    assert_eq!(
+        error.to_string(),
+        "duplicate case-insensitive element name 'C1'"
+    );
+}
+
+#[test]
+fn a_name_is_taken_whatever_its_case() {
+    let error = build_error("V1 a 0 10\nRload a b 10\nRLOAD b 0 20\n");
+    assert_eq!(
+        error.to_string(),
+        "duplicate case-insensitive element name 'RLOAD'"
+    );
+}
+
+#[test]
+fn one_name_is_taken_across_two_different_device_letters() {
+    // Names live in one namespace: `R1` and `C1` are fine together, but `R1` and `RC`-style
+    // reuse of the *same* spelling is not, whichever letters wrote it. A netlist referring to
+    // 'X1' by name has to have exactly one meaning.
+    let error = build_error("V1 a 0 10\nR1 a b 10\nC1 b 0 1u\nR1 b 0 1k\n");
+    assert_eq!(
+        error.to_string(),
+        "duplicate case-insensitive element name 'R1'"
+    );
+}
+
+#[test]
+fn the_letters_that_were_already_checked_still_report_the_same_message() {
+    // `L` carries a branch current, so this case was rejected before the check was made
+    // universal -- by `UnknownIndex::add_branch`. Same error, so no caller has to change.
+    let error = build_error("V1 a 0 10\nL1 a b 36u\nL1 b 0 36u\n");
+    assert_eq!(
+        error.to_string(),
+        "duplicate case-insensitive element name 'L1'"
+    );
+}
+
+#[test]
+fn distinct_names_sharing_a_letter_still_build() {
+    let system = MnaBuilder::new(Dialect::Ngspice)
+        .build_fragment("V1 a 0 10\nR1 a b 10\nR2 b 0 20\n")
+        .unwrap();
+    // The divider is still a divider: two resistors, one voltage source, two live nodes.
+    assert!(system.unknowns.iter().any(|u| u == "V(a)"));
+    assert!(system.unknowns.iter().any(|u| u == "V(b)"));
+}
+
+#[test]
+fn two_instances_of_one_subckt_still_build_because_flattening_prefixes_the_names() {
+    // The uniqueness check runs on the *flattened* statement list, where a body element is
+    // named `X1.R1`/`X2.R1`. Were it run before flattening -- or were flattening to stop
+    // prefixing -- this deck would now be rejected, so this test pins the order down.
+    let source = concat!(
+        ".subckt divider in out\n",
+        "R1 in out 1k\n",
+        "R2 out 0 1k\n",
+        ".ends divider\n",
+        "V1 a 0 10\n",
+        "X1 a m divider\n",
+        "X2 m 0 divider\n",
+    );
+    let system = general_mna::build_system(source, Dialect::Ngspice)
+        .unwrap()
+        .mna;
+    assert!(system.unknowns.iter().any(|u| u == "V(m)"));
+}
