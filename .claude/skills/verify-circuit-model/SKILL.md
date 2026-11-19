@@ -1,6 +1,6 @@
 ---
 name: verify-circuit-model
-description: Verify an elspice-mna element stamp, circuit reduction, converter average, transfer function, or generated educational report against independently derived equations. Use for new devices, topologies, state-space outputs, averaging changes, Python parity, notebooks, or PDFs.
+description: Verify an general-mna element stamp, circuit reduction, converter average, transfer function, or generated educational report against independently derived equations. Use for new devices, topologies, state-space outputs, averaging changes, Python parity, notebooks, or PDFs.
 ---
 
 # Verify a circuit model

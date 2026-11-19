@@ -35,9 +35,7 @@ It deliberately separates three jobs:
    DTO is what a `wasm-bindgen` front end would export.
 
 The old Python ElSpice project was used as a behavioral reference. It is not
-modified or imported by this repository -- but the binding is still packaged
-under its name, `elspice_mna`, which is a leftover rather than a decision; see
-[#37](https://github.com/GLODI-Engineering/general-mna/issues/37).
+modified or imported by this repository, and nothing here carries its name.
 
 ## Implemented
 
@@ -379,15 +377,12 @@ symbolic MNA construction and native numeric state-space reduction:
 ```bash
 ./python/build_binding.sh
 PYTHONPATH=python python3 -c \
-  "from elspice_mna import build_mna; print(build_mna('R1 1 0 1k'))"
+  "from general_mna import build_mna; print(build_mna('R1 1 0 1k'))"
 ```
 
 For a packaged installation, `python/pyproject.toml` is configured for
-Maturin and builds the same `elspice_mna._native` module. The package name is
-the retired predecessor project's, not this one's; renaming it moves the
-notebooks, the scripts and the generated reports with it, so it is tracked
-separately in [#37](https://github.com/GLODI-Engineering/general-mna/issues/37)
-rather than changed here.
+Maturin and builds the same `general_mna._native` module -- one name for the
+crate, the Rust library, the Python package and the distribution.
 
 ## Verified converter examples
 

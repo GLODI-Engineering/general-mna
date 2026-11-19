@@ -8,7 +8,7 @@ from pathlib import Path
 
 import sympy as sp
 
-from elspice_mna.converters import SPECS, analyze_converter, summary_text
+from general_mna.converters import SPECS, analyze_converter, summary_text
 
 ROOT = Path(__file__).resolve().parents[1]
 NOTEBOOKS = ROOT / "notebooks"
@@ -97,7 +97,7 @@ def build_notebook(key: str) -> dict:
         "if not (repository / 'python').exists():\n"
         "    repository = repository.parent\n"
         "sys.path.insert(0, str(repository / 'python'))\n"
-        "from elspice_mna.converters import analyze_converter, summary_text\n"
+        "from general_mna.converters import analyze_converter, summary_text\n"
         f"analysis = analyze_converter({key!r})\n"
         "print(summary_text(analysis))\n"
     )

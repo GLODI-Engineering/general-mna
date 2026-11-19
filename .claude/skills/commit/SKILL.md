@@ -1,9 +1,9 @@
 ---
 name: commit
-description: Run the complete elspice-mna quality gate, review and stage the diff deliberately, update the dated journal, and create a Conventional Commit. Use whenever committing changes in this repository.
+description: Run the complete general-mna quality gate, review and stage the diff deliberately, update the dated journal, and create a Conventional Commit. Use whenever committing changes in this repository.
 ---
 
-# Commit elspice-mna changes
+# Commit general-mna changes
 
 1. Read `AGENTS.md`, the newest journal entry, and `docs/gotchas/INDEX.md`.
 2. Inspect `git status`, `git diff`, and any already-staged diff. Check for

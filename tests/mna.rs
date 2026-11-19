@@ -260,7 +260,7 @@ fn sin_source_is_stamped_as_a_symbol_not_a_baked_literal() {
     // With the caller supplying the transient function's own value at some t, u reflects it
     // exactly -- this is the whole point: the same MnaSystem, evaluated with different
     // caller-supplied "V1" values, reproduces different circuit states as if V1 varies with
-    // time, without elspice-mna itself knowing anything about "time."
+    // time, without general-mna itself knowing anything about "time."
     let evaluated_at_quarter_period = system
         .evaluate(&BTreeMap::from([("V1".to_string(), sin.value_at(2.5e-4))]))
         .unwrap();

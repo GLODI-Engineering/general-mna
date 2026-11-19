@@ -2,8 +2,8 @@ import unittest
 
 import sympy as sp
 
-from elspice_mna import build_mna, numeric_state_space
-from elspice_mna.converters import SPECS, analyze_converter
+from general_mna import build_mna, numeric_state_space
+from general_mna.converters import SPECS, analyze_converter
 
 
 class BindingTests(unittest.TestCase):

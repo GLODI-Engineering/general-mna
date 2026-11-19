@@ -1,8 +1,8 @@
 # Agent guidelines
 
-`elspice-mna` is an educational Rust library that turns SPICE netlists into
-modified nodal systems and state-space models. It also exposes Python bindings
-and verified converter state-space-averaging reports.
+`general-mna` is a published Rust crate that turns SPICE netlists into modified
+nodal systems and state-space models. It also exposes Python bindings and
+verified converter state-space-averaging reports.
 
 ## Authority order
 
