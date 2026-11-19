@@ -489,29 +489,76 @@ pub(crate) fn parse_spice_number(raw: &str) -> Option<f64> {
         .char_indices()
         .find(|(_, character)| character.is_ascii_alphabetic())
         .map(|(index, _)| index)?;
-    let base = raw[..split].parse::<f64>().ok()?;
+    let base = raw[..split].trim();
+    // Reject the suffix before building anything, and keep the base parseable on its own so a
+    // malformed value is still refused rather than concatenated into something that parses.
     let suffix = raw[split..].to_ascii_lowercase();
-    let factor = if suffix.starts_with("meg") {
-        1e6
+    let exponent = if suffix.starts_with("meg") {
+        6
     } else {
         match suffix.chars().next()? {
-            't' => 1e12,
-            'g' => 1e9,
-            'k' => 1e3,
-            'm' => 1e-3,
-            'u' => 1e-6,
-            'n' => 1e-9,
-            'p' => 1e-12,
-            'f' => 1e-15,
+            't' => 12,
+            'g' => 9,
+            'k' => 3,
+            'm' => -3,
+            'u' => -6,
+            'n' => -9,
+            'p' => -12,
+            'f' => -15,
             _ => return None,
         }
     };
-    Some(base * factor)
+    let scaled = base.parse::<f64>().ok()?;
+    // Appended as an exponent rather than applied as a multiplication, so a suffixed value and
+    // its exponent spelling are the *same* f64 rather than one ULP apart. `300n` used to come
+    // out as 3.0000000000000004e-7 while `300e-9` is exactly 3e-7, because `300.0 * 1e-9`
+    // rounds and `3e-7` does not. The difference never mattered to a result, but two spellings
+    // of one value reading differently is the kind of thing that costs an afternoon when it
+    // finally does.
+    //
+    // The multiplication stays as the fallback for a base the concatenation cannot express --
+    // `300.` is a valid f64 and `300.e-9` is not.
+    match format!("{base}e{exponent}").parse::<f64>() {
+        Ok(value) => Some(value),
+        Err(_) => Some(scaled * 10f64.powi(exponent)),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_suffixed_number_is_the_same_f64_as_its_exponent_spelling() {
+        // Not merely close: the same bits. `300n` used to be 3.0000000000000004e-7, because
+        // `300.0 * 1e-9` rounds, while `300e-9` is exactly 3e-7. Two spellings of one value
+        // have to be one value.
+        for (suffixed, exponent) in [
+            ("300n", "300e-9"),
+            ("1.5u", "1.5e-6"),
+            ("47p", "47e-12"),
+            ("100k", "100e3"),
+            ("2meg", "2e6"),
+            ("7f", "7e-15"),
+            ("3m", "3e-3"),
+        ] {
+            let a = parse_spice_number(suffixed).expect(suffixed);
+            let b = exponent.parse::<f64>().expect(exponent);
+            assert_eq!(
+                a.to_bits(),
+                b.to_bits(),
+                "{suffixed} = {a:e} but {exponent} = {b:e}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_base_the_concatenation_cannot_express_still_parses() {
+        // `300.` is a valid f64 and `300.e-9` is not, so that base falls back to the
+        // multiplication. Within one ULP of the exact value, which is what the fallback costs.
+        let value = parse_spice_number("300.n").expect("300.n");
+        assert!((value - 3e-7).abs() <= f64::EPSILON * 3e-7);
+    }
 
     #[test]
     fn parses_spice_suffixes() {

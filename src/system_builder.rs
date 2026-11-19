@@ -351,7 +351,7 @@ fn parse_sample_time(
     kind_str: &str,
 ) -> Result<Option<SampleTimeSpec>, String> {
     let get = |key: &str| -> Result<f64, String> {
-        fields
+        let raw = fields
             .get(key)
             .ok_or_else(|| {
                 format!(
@@ -359,13 +359,13 @@ fn parse_sample_time(
                     line_number + 1
                 )
             })?
-            .parse::<f64>()
-            .map_err(|_| {
-                format!(
-                    "line {}: device '{name}' field '{key}' is not a number",
-                    line_number + 1
-                )
-            })
+            .as_str();
+        crate::expression::parse_spice_number(raw).ok_or_else(|| {
+            format!(
+                "line {}: device '{name}' field '{key}' is not a number",
+                line_number + 1
+            )
+        })
     };
 
     if fields.get("ts").map(String::as_str) == Some("variable") {
@@ -482,10 +482,9 @@ fn parse_const_value(
             line_number,
         )?))
     } else {
-        text.trim()
-            .parse::<f64>()
+        crate::expression::parse_spice_number(text.trim())
             .map(ConstValue::Scalar)
-            .map_err(|_| {
+            .ok_or_else(|| {
                 format!(
                     "line {}: device '{name}' field '{field}' is not a number",
                     line_number + 1
@@ -523,12 +522,14 @@ fn parse_gain_value(
             line_number + 1
         ));
     }
-    trimmed.parse::<f64>().map(GainValue::Scalar).map_err(|_| {
-        format!(
-            "line {}: device '{name}' field '{field}' is not a number",
-            line_number + 1
-        )
-    })
+    crate::expression::parse_spice_number(trimmed)
+        .map(GainValue::Scalar)
+        .ok_or_else(|| {
+            format!(
+                "line {}: device '{name}' field '{field}' is not a number",
+                line_number + 1
+            )
+        })
 }
 
 /// Parses a `kind=statespace` block's `b=`/`c=` field: a flat list (`b=[1,0]`, `c=[1,0]` — the
@@ -616,7 +617,7 @@ fn build_kind(stmt: &general_spice_core::ast::BlockInstance) -> Result<Kind, Str
     let fields = Fields::new(stmt.fields.iter().cloned().collect());
 
     let get = |key: &str| -> Result<f64, String> {
-        fields
+        let raw = fields
             .get(key)
             .ok_or_else(|| {
                 format!(
@@ -624,13 +625,13 @@ fn build_kind(stmt: &general_spice_core::ast::BlockInstance) -> Result<Kind, Str
                     line_number + 1
                 )
             })?
-            .parse::<f64>()
-            .map_err(|_| {
-                format!(
-                    "line {}: device '{name}' field '{key}' is not a number",
-                    line_number + 1
-                )
-            })
+            .as_str();
+        crate::expression::parse_spice_number(raw).ok_or_else(|| {
+            format!(
+                "line {}: device '{name}' field '{key}' is not a number",
+                line_number + 1
+            )
+        })
     };
 
     let get_str = |key: &str| -> Result<String, String> {
@@ -823,7 +824,7 @@ fn build_kind(stmt: &general_spice_core::ast::BlockInstance) -> Result<Kind, Str
             let get_opt = |key: &str, default: f64| -> f64 {
                 fields
                     .get(key)
-                    .and_then(|s| s.parse::<f64>().ok())
+                    .and_then(|s| crate::expression::parse_spice_number(s))
                     .unwrap_or(default)
             };
             Kind::Block(BlockInstance {
@@ -844,7 +845,7 @@ fn build_kind(stmt: &general_spice_core::ast::BlockInstance) -> Result<Kind, Str
             let get_opt = |key: &str, default: f64| -> f64 {
                 fields
                     .get(key)
-                    .and_then(|s| s.parse::<f64>().ok())
+                    .and_then(|s| crate::expression::parse_spice_number(s))
                     .unwrap_or(default)
             };
             Kind::Block(BlockInstance {
@@ -866,7 +867,7 @@ fn build_kind(stmt: &general_spice_core::ast::BlockInstance) -> Result<Kind, Str
             let get_opt = |key: &str, default: f64| -> f64 {
                 fields
                     .get(key)
-                    .and_then(|s| s.parse::<f64>().ok())
+                    .and_then(|s| crate::expression::parse_spice_number(s))
                     .unwrap_or(default)
             };
             let td1 = get_opt("td1", 0.0);
@@ -893,7 +894,7 @@ fn build_kind(stmt: &general_spice_core::ast::BlockInstance) -> Result<Kind, Str
             let get_opt = |key: &str, default: f64| -> f64 {
                 fields
                     .get(key)
-                    .and_then(|s| s.parse::<f64>().ok())
+                    .and_then(|s| crate::expression::parse_spice_number(s))
                     .unwrap_or(default)
             };
             Kind::Block(BlockInstance {
@@ -914,7 +915,7 @@ fn build_kind(stmt: &general_spice_core::ast::BlockInstance) -> Result<Kind, Str
             let signs: Vec<f64> = get_str("signs")?
                 .split(',')
                 .map(|s| {
-                    s.parse::<f64>().map_err(|_| {
+                    crate::expression::parse_spice_number(s).ok_or_else(|| {
                         format!(
                             "line {}: device '{name}' field 'signs' entry '{s}' is not a \
                                  number",
@@ -1018,25 +1019,27 @@ fn build_kind(stmt: &general_spice_core::ast::BlockInstance) -> Result<Kind, Str
                     freq_hz: get("freq")?,
                     red: fields
                         .get("red")
-                        .map(|s| s.parse::<f64>())
-                        .transpose()
-                        .map_err(|_| {
-                            format!(
-                                "line {}: device '{name}' field 'red' is not a number",
-                                line_number + 1
-                            )
-                        })?
+                        .map(|s| {
+                            crate::expression::parse_spice_number(s).ok_or_else(|| {
+                                format!(
+                                    "line {}: device '{name}' field 'red' is not a number",
+                                    line_number + 1
+                                )
+                            })
+                        })
+                        .transpose()?
                         .unwrap_or(0.0),
                     fed: fields
                         .get("fed")
-                        .map(|s| s.parse::<f64>())
-                        .transpose()
-                        .map_err(|_| {
-                            format!(
-                                "line {}: device '{name}' field 'fed' is not a number",
-                                line_number + 1
-                            )
-                        })?
+                        .map(|s| {
+                            crate::expression::parse_spice_number(s).ok_or_else(|| {
+                                format!(
+                                    "line {}: device '{name}' field 'fed' is not a number",
+                                    line_number + 1
+                                )
+                            })
+                        })
+                        .transpose()?
                         .unwrap_or(0.0),
                     output_names,
                 },
@@ -1078,14 +1081,15 @@ fn build_kind(stmt: &general_spice_core::ast::BlockInstance) -> Result<Kind, Str
             let get_opt = |key: &str| -> Result<f64, String> {
                 fields
                     .get(key)
-                    .map(|s| s.parse::<f64>())
-                    .transpose()
-                    .map_err(|_| {
-                        format!(
-                            "line {}: device '{name}' field '{key}' is not a number",
-                            line_number + 1
-                        )
+                    .map(|s| {
+                        crate::expression::parse_spice_number(s).ok_or_else(|| {
+                            format!(
+                                "line {}: device '{name}' field '{key}' is not a number",
+                                line_number + 1
+                            )
+                        })
                     })
+                    .transpose()
                     .map(|v| v.unwrap_or(0.0))
             };
             Kind::Block(BlockInstance {
@@ -1867,10 +1871,11 @@ fn parse_block_initial_condition(
         let values = if text.trim().starts_with('[') {
             parse_vector(text, name, "ic", line_number)?
         } else {
-            vec![text
-                .trim()
-                .parse::<f64>()
-                .map_err(|_| format!("line {line}: device '{name}' field 'ic' is not a number"))?]
+            vec![
+                crate::expression::parse_spice_number(text.trim()).ok_or_else(|| {
+                    format!("line {line}: device '{name}' field 'ic' is not a number")
+                })?,
+            ]
         };
         if values.len() != states {
             return Err(format!(
@@ -1882,10 +1887,8 @@ fn parse_block_initial_condition(
         finite(values)
     };
     let scalar = |text: &str, key: &str| -> Result<f64, String> {
-        let v = text
-            .trim()
-            .parse::<f64>()
-            .map_err(|_| format!("line {line}: device '{name}' field '{key}' is not a number"))?;
+        let v = crate::expression::parse_spice_number(text.trim())
+            .ok_or_else(|| format!("line {line}: device '{name}' field '{key}' is not a number"))?;
         finite(vec![v]).map(|v| v[0])
     };
     let settled = |result: Result<Vec<f64>, SettledStateError>, key: &str, what: &str| {
