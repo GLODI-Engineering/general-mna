@@ -586,25 +586,90 @@ fn a_missing_sample_left_blank() {
     }
 }
 
-/// A clipped sample written as `nan` **loads**, and nothing downstream is told.
+/// A clipped sample written as `nan` is refused, naming the line and the column.
 ///
-/// `parse_spice_number` accepts `nan`, `inf` and `-inf`, because Rust's own float parser does
-/// and nothing here asked it not to. So a capture with one overrange sample becomes a
-/// breakpoint list with a NaN in it, and the first solve that interpolates across that segment
-/// returns NaN for the rest of the run.
-///
-/// Worse in the time column, which this fixture does not have but the issue does: `time <
-/// previous` is false when either is NaN, so the monotonicity check passes, and
-/// `partition_point` over a list with no total order picks an arbitrary segment.
-///
-/// Pinned as it is. See #48.
+/// `parse_spice_number` falls back to Rust's own float parser, which accepts `nan`, `inf` and
+/// `-inf`. For a netlist field that is a question for another day; for a capture it is not a
+/// question at all. A NaN value would become a breakpoint, and the first step that interpolated
+/// across that segment would return NaN for the rest of the run, with nothing anywhere naming
+/// the capture as the cause.
 #[test]
-fn an_overrange_sample_loads_as_a_nan() {
-    let table = loaded("overrange-sample.csv");
+fn an_overrange_sample_is_refused() {
+    match refused("overrange-sample.csv") {
+        WaveFileError::NotFinite {
+            line,
+            column,
+            field,
+            ..
+        } => {
+            assert_eq!(
+                (line, column),
+                (4, 2),
+                "the third data row, the value column"
+            );
+            assert_eq!(field, "nan");
+        }
+        other => panic!("expected NotFinite, got {other:?}"),
+    }
+}
 
-    assert_eq!(table.samples, 4);
+/// `inf` and `-inf` are refused the same way, at the first of them.
+#[test]
+fn an_infinite_sample_is_refused() {
+    match refused("infinite-sample.csv") {
+        WaveFileError::NotFinite { line, field, .. } => {
+            assert_eq!(
+                line, 3,
+                "refused at the first one, not after reading the file"
+            );
+            assert_eq!(field, "inf");
+        }
+        other => panic!("expected NotFinite, got {other:?}"),
+    }
+}
+
+/// A `nan` **timestamp** is the worse half, and the reason the check cannot live in the
+/// monotonicity test.
+///
+/// `time < previous` is false when either side is NaN, so a NaN timestamp passes the ordering
+/// check and the breakpoint list it admits has no total order at all. `segment_before`'s
+/// `partition_point` is documented as returning an unspecified index on an unsorted slice, so
+/// the waveform that results is not wrong in some bounded way -- it is arbitrary.
+///
+/// This is refused before the ordering check ever runs, because `number_at` is the one place
+/// every time and every value in a capture passes through.
+#[test]
+fn a_nan_timestamp_is_refused_rather_than_silently_admitted() {
+    match refused("nan-timestamp.csv") {
+        WaveFileError::NotFinite {
+            line,
+            column,
+            field,
+            ..
+        } => {
+            assert_eq!((line, column), (3, 1), "the time column, column one");
+            assert_eq!(field, "nan");
+        }
+        other => panic!("expected NotFinite, got {other:?}"),
+    }
+}
+
+/// The message says why `nan` is not a number *here*, which `NotANumber` could not.
+#[test]
+fn the_refusal_explains_itself() {
+    let message = refused("nan-timestamp.csv").to_string();
+
     assert!(
-        table.columns[0].iter().any(|(_, value)| value.is_nan()),
-        "today a NaN sample is a sample -- the defect this pins"
+        message.contains("nan-timestamp.csv"),
+        "names the file: {message}"
+    );
+    assert!(message.contains("line 3"), "and the line: {message}");
+    assert!(
+        message.contains("not a finite one"),
+        "and distinguishes this from junk: {message}"
+    );
+    assert!(
+        message.contains("removed or replaced"),
+        "and says what to do about it: {message}"
     );
 }

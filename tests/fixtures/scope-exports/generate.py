@@ -330,6 +330,33 @@ def overrange_sample() -> None:
     write("overrange-sample.csv", "\n".join(lines) + "\n")
 
 
+def nan_timestamp() -> None:
+    """A dropped sample whose *timestamp* is `nan`, not just its value.
+
+    The worse half of the non-finite problem: `time < previous` is false when either side is
+    NaN, so a monotonicity check written that way passes, and the breakpoint list it admits has
+    no total order for a binary search to rely on.
+    """
+    lines = [
+        "TIME,CH1",
+        "0.0000000e+00,0.0000000e+00",
+        "nan,3.3000000e+00",
+        "2.0000000e-03,3.3000000e+00",
+    ]
+    write("nan-timestamp.csv", "\n".join(lines) + "\n")
+
+
+def infinite_sample() -> None:
+    """`inf` and `-inf` -- the other spellings Rust's float parser accepts."""
+    lines = [
+        "TIME,CH1",
+        "0.0000000e+00,0.0000000e+00",
+        "1.0000000e-03,inf",
+        "2.0000000e-03,-inf",
+    ]
+    write("infinite-sample.csv", "\n".join(lines) + "\n")
+
+
 def empty_field() -> None:
     """A missing sample left as an empty field, which keeps the row's width."""
     lines = [
@@ -362,6 +389,8 @@ def main() -> None:
         setup_only,
         interleaved_metadata_and_data,
         overrange_sample,
+        nan_timestamp,
+        infinite_sample,
         empty_field,
     ):
         builder()
