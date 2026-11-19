@@ -210,6 +210,38 @@ pub enum SampleTimeSpec {
     Variable,
 }
 
+/// How a [`BlockKind::FileWave`] finds the value between two samples.
+///
+/// The two choices are the two existing block kinds' semantics, named rather than reimplemented:
+/// `Linear` is [`BlockKind::Pwl`] and `Hold` is [`BlockKind::Pwc`]. Which one is right is a
+/// property of the signal, not of the file: a sampled analogue voltage interpolates, and a
+/// register value a microcontroller printed does not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WaveInterp {
+    /// Linear interpolation between samples — real SPICE PWL semantics.
+    Linear,
+    /// Hold each sample until the next one.
+    Hold,
+}
+
+/// What a [`BlockKind::FileWave`] does once `t` passes its last sample.
+///
+/// A capture is finite and a run need not be. Holding the last value is the safe default and
+/// the easiest to misread, which is why `Error` exists: a run that outlasts its data by a
+/// factor of ten is a simulation driven by a constant for 90% of its length, and nothing in the
+/// output says so.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WaveAfter {
+    /// Hold the last sample's value. The default.
+    Hold,
+    /// Wrap time into the capture's own span, making it periodic.
+    Repeat,
+    /// Zero past the end.
+    Zero,
+    /// Refuse the run, before it starts, if it would outlast the capture.
+    Error,
+}
+
 /// One block's behavior. `Const`/`Pwc`/`Pwl`/`Sin`/`Pulse`/`Exp`/`Sffm` are sources (zero
 /// inputs); `Sum`/`Gain` are stateless (recomputed fresh from their inputs every step);
 /// `Pid`/`StateSpace`/`TransferFunction`/`Vco` carry their own state forward across steps.
@@ -393,6 +425,86 @@ pub enum BlockKind {
         points: Vec<(f64, f64)>,
         /// If `true`, wraps `t` into the breakpoint range instead of holding flat past the last point.
         repeat: bool,
+    },
+    /// <!-- component -->
+    /// # File-Backed Source (filewave)
+    /// **Purpose:** a measured waveform — an oscilloscope capture, or a table a microcontroller
+    /// printed over a serial link — as a source the solver can drive a circuit with, and as a
+    /// reference a run can be graded against.
+    /// **Library:** Sources
+    ///
+    /// ## Description
+    /// Reads a text table once, at build time, and becomes one output per value column. Between
+    /// samples it is exactly [`BlockKind::Pwl`] (`interp=linear`, the default) or
+    /// [`BlockKind::Pwc`] (`interp=hold`): the file supplies breakpoints and the existing
+    /// interpolation answers every question about what the waveform is between them, so a
+    /// capture and a hand-written `points=` list of the same numbers are the same waveform.
+    ///
+    /// **This is the only file-backed source, and it is in the signal domain on purpose.** A
+    /// `V`/`I` source's magnitude may name nothing but a [`BlockKind::Sig2Phys`], so a measured
+    /// voltage source is this block plus a `sig2phys` — not a second kind of source element. A
+    /// `FILE(...)` form on the element card would be a second path into the solver that this
+    /// project deliberately does not have.
+    ///
+    /// Multi-output, following the [`BlockKind::CScript`] convention: `output_names[0]` aliases
+    /// this block's own name and the rest are addressed `<block>.<name>`, so a two-channel
+    /// capture read as `SCOPE` offers `SCOPE` (the first channel) and `SCOPE.CH2`.
+    ///
+    /// ## Parameters
+    /// - `path=<file>` — required. A relative path resolves against the **process's working
+    ///   directory**, not the netlist's directory: the same rule `kind=cscript`'s `lib=` and
+    ///   `kind=pyblock`'s `path=` already follow.
+    /// - `outputs=<n1,n2,...>` — optional; names the outputs, overriding the file's header.
+    /// - `time=<column>` / `cols=<c1,c2>` — optional; which column is time (default: the
+    ///   first), and which become outputs (default: all the others). Either may be a 1-based
+    ///   position or a name from the header.
+    /// - `interp=linear|hold` — optional (default `linear`).
+    /// - `after=hold|repeat|zero|error` — optional (default `hold`); what the source does past
+    ///   the capture's last sample. `error` refuses a run that would outlast the data, which is
+    ///   the one case where holding silently is a wrong simulation that looks right.
+    /// - `tshift=auto|none|<seconds>` — optional (default `auto`, which subtracts the first
+    ///   sample's time so the capture starts at `t = 0`). A scope export is centred on its
+    ///   trigger and starts negative; a capture that silently began at `t = -5 ms` would put a
+    ///   whole comparison half a window out of phase.
+    /// - `scale=` / `offset=` — optional; `scale * v + offset` per value, for a ×10 probe or a
+    ///   removed DC offset.
+    /// - `skip=<n>` / `delim=<char>` — optional; override the preamble detection (any leading
+    ///   line whose first field is not a number) and the separator detection.
+    ///
+    /// ## Errors
+    /// Every refusal names the file and, where there is one, the line: a missing file, a ragged
+    /// row, a non-numeric field, a time column that decreases, a one-column file, a column that
+    /// is not there (listing the ones that are), and a number written with a decimal comma —
+    /// which is refused rather than guessed at, because `0,001;1,23` is four fields with a
+    /// comma separator and two numbers without one. See [`crate::wave_file::WaveFileError`].
+    ///
+    /// ## Netlist form
+    /// ```text
+    /// NAME kind=filewave path=<file> [outputs=<n1,n2>] [time=<col>] [cols=<c1,c2>]
+    ///      [interp=linear|hold] [after=hold|repeat|zero|error] [tshift=auto|none|<s>]
+    ///      [scale=<k>] [offset=<v>] [skip=<n>] [delim=<char>]
+    /// ```
+    ///
+    /// ## Example
+    /// A measured gate drive driving the real switch, and the measured output graded against
+    /// the simulated one:
+    /// ```text
+    /// SCOPE kind=filewave path=capture.csv outputs=VGS,VOUT
+    /// GATE  kind=sig2phys domain=voltage in=SCOPE
+    /// M_fit kind=measure type=error out=V(out) ref=SCOPE.VOUT norm=l2
+    /// ```
+    FileWave {
+        /// One `(time, value)` breakpoint list per output, already shifted, scaled and offset.
+        columns: Vec<Vec<(f64, f64)>>,
+        /// This block's own output names, in order; `output_names[0]` aliases its name.
+        output_names: Vec<String>,
+        /// How the value between two samples is found.
+        interp: WaveInterp,
+        /// What the source does past the last sample.
+        after: WaveAfter,
+        /// The file this came from, for diagnostics and for a consumer that wants to show the
+        /// capture beside the run.
+        source: std::path::PathBuf,
     },
     /// <!-- component -->
     /// # Waveform Sources (sinwave / pulsewave / expwave / sffmwave)
@@ -2528,6 +2640,7 @@ pub fn block_kind_name(kind: &BlockKind) -> &'static str {
         BlockKind::Time => "time",
         BlockKind::Pwc { .. } => "pwc",
         BlockKind::Pwl { .. } => "pwl",
+        BlockKind::FileWave { .. } => "filewave",
         BlockKind::Waveform(TransientFunction::Sin { .. }) => "sinwave",
         BlockKind::Waveform(TransientFunction::Pulse { .. }) => "pulsewave",
         BlockKind::Waveform(TransientFunction::Exp { .. }) => "expwave",

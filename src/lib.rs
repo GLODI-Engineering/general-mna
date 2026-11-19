@@ -32,6 +32,7 @@ mod symbolic;
 mod system;
 mod system_builder;
 mod transient_source;
+pub mod wave_file;
 
 #[cfg(feature = "python")]
 mod python;
@@ -50,3 +51,4 @@ pub use symbolic::{
 pub use system::{DeviceAnnotation, InitialCondition, MnaSystem, StringMnaSystem};
 pub use system_builder::{build_system, parse_and_flatten, System};
 pub use transient_source::{PwlPoints, TransientFunction};
+pub use wave_file::{ColumnRef, LoadOptions, TimeShift, WaveFileError, WaveTable};

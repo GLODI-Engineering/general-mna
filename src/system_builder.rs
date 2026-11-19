@@ -611,6 +611,23 @@ fn parse_matrix_rows(
         .collect()
 }
 
+/// A `delim=` value: a single character, or a word for one that cannot be written literally in
+/// a whitespace-separated netlist field.
+fn parse_delimiter(raw: &str) -> Option<char> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "tab" => return Some('\t'),
+        "space" => return Some(' '),
+        "comma" => return Some(','),
+        "semicolon" => return Some(';'),
+        _ => {}
+    }
+    let mut chars = raw.chars();
+    match (chars.next(), chars.next()) {
+        (Some(only), None) => Some(only),
+        _ => None,
+    }
+}
+
 fn build_kind(stmt: &general_spice_core::ast::BlockInstance) -> Result<Kind, String> {
     let name = &stmt.name;
     let line_number = stmt.span.start.saturating_sub(1);
@@ -805,6 +822,138 @@ fn build_kind(stmt: &general_spice_core::ast::BlockInstance) -> Result<Kind, Str
             Kind::Block(BlockInstance {
                 name: name.to_string(),
                 kind: BlockKind::Pwl { points, repeat },
+                inputs: Vec::new(),
+                ic: None,
+            })
+        }
+        // "filewave": a measured waveform off disk -- see `BlockKind::FileWave`'s own doc
+        // comment for the whole contract. Loaded here, at parse time, rather than lazily at
+        // first evaluation: a netlist that names a file that is not there, or a column that is
+        // not in it, should fail before a single step is taken, not ten seconds into a run.
+        //
+        // The file becomes `(t, v)` breakpoints and nothing more. Between samples this block is
+        // `Pwl` or `Pwc`, whose interpolation is already implemented and tested, so a capture
+        // and a hand-written `points=` list of the same numbers are the same waveform.
+        "filewave" => {
+            let path = std::path::PathBuf::from(get_str("path")?);
+            let column_ref = |raw: &str| -> crate::wave_file::ColumnRef {
+                // A bare number is a 1-based position, as a user counting columns in a
+                // spreadsheet would say it; anything else is a header name. One-based because
+                // every other column a user ever names -- in a spreadsheet, in an editor's
+                // gutter, in this crate's own error messages -- is.
+                match raw.trim().parse::<usize>() {
+                    Ok(position) if position >= 1 => {
+                        crate::wave_file::ColumnRef::Index(position - 1)
+                    }
+                    _ => crate::wave_file::ColumnRef::Name(raw.trim().to_string()),
+                }
+            };
+            let interp = match fields.get("interp").map(String::as_str) {
+                None | Some("linear") => crate::block_graph::WaveInterp::Linear,
+                Some("hold") => crate::block_graph::WaveInterp::Hold,
+                Some(other) => {
+                    return Err(format!(
+                        "line {}: device '{name}': unknown interp '{other}' -- one of linear, \
+                         hold",
+                        line_number + 1
+                    ))
+                }
+            };
+            let after = match fields.get("after").map(String::as_str) {
+                None | Some("hold") => crate::block_graph::WaveAfter::Hold,
+                Some("repeat") => crate::block_graph::WaveAfter::Repeat,
+                Some("zero") => crate::block_graph::WaveAfter::Zero,
+                Some("error") => crate::block_graph::WaveAfter::Error,
+                Some(other) => {
+                    return Err(format!(
+                        "line {}: device '{name}': unknown after '{other}' -- one of hold, \
+                         repeat, zero, error",
+                        line_number + 1
+                    ))
+                }
+            };
+            let time_shift = match fields.get("tshift").map(String::as_str) {
+                None | Some("auto") => crate::wave_file::TimeShift::Auto,
+                Some("none") => crate::wave_file::TimeShift::None,
+                Some(other) => match crate::expression::parse_spice_number(other) {
+                    Some(seconds) => crate::wave_file::TimeShift::By(seconds),
+                    None => {
+                        return Err(format!(
+                            "line {}: device '{name}': tshift '{other}' is neither auto, none, \
+                             nor a number of seconds",
+                            line_number + 1
+                        ))
+                    }
+                },
+            };
+            let number = |key: &str, default: f64| -> Result<f64, String> {
+                match fields.get(key) {
+                    None => Ok(default),
+                    Some(raw) => crate::expression::parse_spice_number(raw).ok_or_else(|| {
+                        format!(
+                            "line {}: device '{name}': field '{key}' is not a number: '{raw}'",
+                            line_number + 1
+                        )
+                    }),
+                }
+            };
+            let options = crate::wave_file::LoadOptions {
+                time: fields
+                    .get("time")
+                    .map(|raw| column_ref(raw))
+                    .unwrap_or(crate::wave_file::ColumnRef::Index(0)),
+                columns: fields
+                    .get("cols")
+                    .map(|raw| raw.split(',').map(column_ref).collect()),
+                names: fields
+                    .get("outputs")
+                    .map(|raw| raw.split(',').map(|part| part.trim().to_string()).collect()),
+                skip: match fields.get("skip") {
+                    None => None,
+                    Some(raw) => Some(raw.trim().parse::<usize>().map_err(|_| {
+                        format!(
+                            "line {}: device '{name}': skip '{raw}' is not a line count",
+                            line_number + 1
+                        )
+                    })?),
+                },
+                delimiter: match fields.get("delim") {
+                    None => None,
+                    Some(raw) => Some(parse_delimiter(raw).ok_or_else(|| {
+                        format!(
+                            "line {}: device '{name}': delim '{raw}' is not a single character \
+                             (or one of tab, space, comma, semicolon)",
+                            line_number + 1
+                        )
+                    })?),
+                },
+                time_shift,
+                scale: number("scale", 1.0)?,
+                offset: number("offset", 0.0)?,
+            };
+            // The loader's own message already names the file, the line and the problem, so it
+            // is prefixed with the netlist position and passed through rather than summarised:
+            // a user whose capture will not load needs the file's own diagnosis, not this
+            // crate's paraphrase of it.
+            let table = crate::wave_file::load(&path, &options)
+                .map_err(|error| format!("line {}: device '{name}': {error}", line_number + 1))?;
+            let mut output_names = table.names;
+            // `output_names[0]` aliases the block's own name, as it does for every other
+            // multi-output kind -- otherwise the first channel would be addressable only as
+            // `SCOPE.CH1` while `SCOPE` named nothing, and a single-column capture would need a
+            // dotted name to be used at all.
+            if let Some(first) = output_names.first_mut() {
+                *first = name.to_string();
+            }
+            Kind::Block(BlockInstance {
+                name: name.to_string(),
+                kind: BlockKind::FileWave {
+                    columns: table.columns,
+                    output_names,
+                    interp,
+                    after,
+                    source: path,
+                },
                 inputs: Vec::new(),
                 ic: None,
             })
