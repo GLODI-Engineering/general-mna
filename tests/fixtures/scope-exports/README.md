@@ -1,6 +1,6 @@
 # Scope-export shapes
 
-Nineteen capture files for the loader behind `kind=filewave`, one per **shape** a measured
+Twenty-one capture files for the loader behind `kind=filewave`, one per **shape** a measured
 waveform can arrive in. Loaded by `tests/wave_file_scope_exports.rs`; written by `generate.py`
 in this directory.
 
@@ -29,7 +29,9 @@ numbers survived the trip.
 | `sample-index-start-increment.csv` | sample index in column 1, time base in the header | loads as 20 **s** — #50 |
 | `zero-based-time.csv` | already starts at zero | loads, shift 0 |
 | `repeated-timestamp.csv` | two samples at one instant | loads |
-| `overrange-sample.csv` | a clipped sample written `nan` | loads with a NaN — #48 |
+| `overrange-sample.csv` | a clipped sample written `nan` | refused: `NotFinite` |
+| `nan-timestamp.csv` | a `nan` in the **time** column | refused: `NotFinite` |
+| `infinite-sample.csv` | `inf` and `-inf` samples | refused: `NotFinite` |
 | `decimal-comma-semicolon.csv` | `;` separators, `,` decimal point | refused: `DecimalComma` |
 | `ragged-row.csv` | a row one field short | refused: `RaggedRow` |
 | `time-goes-backwards.csv` | two captures concatenated | refused: `TimeNotMonotonic` |
@@ -38,8 +40,10 @@ numbers survived the trip.
 | `empty-field.csv` | a sample left blank | refused: `NotANumber` |
 | `interleaved-metadata-and-data.csv` | metadata in the left columns, data in the right | refused: `NoData` — #52 |
 
-Five rows name an open issue: that is the outcome today, pinned by a test, and wrong. A pinned
-defect is visible in CI output; an un-pinned one is rediscovered.
+Four rows name an open issue: that is the outcome today, pinned by a test, and wrong. A pinned
+defect is visible in CI output; an un-pinned one is rediscovered. A fifth defect was found the
+same way and is fixed rather than pinned — the three `NotFinite` rows are what that fix looks
+like from here (#48).
 
 **When a real export arrives, add it alongside these rather than editing them.** A fixture whose
 provenance is "measured" is worth more than one whose provenance is "written to pass", and the

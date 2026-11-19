@@ -39,9 +39,17 @@
 //!
 //! A **decimal comma**. `0,001;1,23` is a real European-locale export, and the same bytes with
 //! a comma delimiter are four fields instead of two. There is no reading that is right for both
-//! files, so this one is named and refused with what to do about it. Everything else that goes
-//! wrong — a ragged row, a non-numeric field, a time column that goes backwards, a file with
-//! one column — names the file, the line and the problem.
+//! files, so this one is named and refused with what to do about it.
+//!
+//! A **non-finite sample**. `nan`, `inf` and `-inf` all parse, because Rust's own float parser
+//! accepts them, and none of them is a thing a real signal does. A NaN value would become a
+//! breakpoint and take the rest of the run with it; a NaN *timestamp* would pass the
+//! monotonicity check below, since `time < previous` is false when either side is NaN, and leave
+//! the breakpoint list with no total order for its binary search to rely on. Both are refused at
+//! the field, naming the line and the column.
+//!
+//! Everything else that goes wrong — a ragged row, a non-numeric field, a time column that goes
+//! backwards, a file with one column — names the file, the line and the problem.
 
 use std::collections::BTreeSet;
 use std::fmt;
@@ -170,6 +178,17 @@ pub enum WaveFileError {
         /// The field itself, so the message can quote it.
         field: String,
     },
+    /// A field that parses as a number, but not as a finite one: `nan`, `inf`, `-inf`.
+    NotFinite {
+        /// The file.
+        path: PathBuf,
+        /// The line it is on.
+        line: usize,
+        /// Its one-based column.
+        column: usize,
+        /// The field itself, so the message can quote it.
+        field: String,
+    },
     /// A number written with a decimal comma — see the module doc.
     DecimalComma {
         /// The file.
@@ -247,6 +266,19 @@ impl fmt::Display for WaveFileError {
             } => write!(
                 f,
                 "'{}' line {line} column {column}: '{field}' is not a number",
+                path.display()
+            ),
+            WaveFileError::NotFinite {
+                path,
+                line,
+                column,
+                field,
+            } => write!(
+                f,
+                "'{}' line {line} column {column}: '{field}' is a number but not a finite one \
+                 -- a capture records a real signal, and no sample of one is nan or inf. An \
+                 overrange or dropped sample has to be removed or replaced before the file can \
+                 drive a simulation",
                 path.display()
             ),
             WaveFileError::DecimalComma { path, line, field } => write!(
@@ -606,6 +638,31 @@ fn number_at(
 ) -> Result<f64, WaveFileError> {
     let field = fields[index];
     if let Some(value) = parse_spice_number(field) {
+        // `parse_spice_number` falls back to Rust's own float parser, which accepts `nan`,
+        // `inf` and `-inf`. For a netlist field that is a question for another day; for a
+        // capture it is not a question at all, and letting one through is worse than it
+        // sounds in both columns:
+        //
+        //   * a NaN **value** becomes a breakpoint, and the first step that interpolates
+        //     across that segment returns NaN for the rest of the run, with nothing anywhere
+        //     naming the capture as the cause;
+        //   * a NaN **time** defeats the monotonicity check below, because `time < previous`
+        //     is false when either side is NaN. The breakpoint list then has no total order,
+        //     and `segment_before`'s `partition_point` is documented as returning an
+        //     unspecified index on an unsorted slice -- so the waveform is not wrong in some
+        //     bounded way, it is arbitrary.
+        //
+        // Refused here rather than in `parse_spice_number` so that only the loader's contract
+        // changes: this is the one place every time and every value in a capture passes
+        // through.
+        if !value.is_finite() {
+            return Err(WaveFileError::NotFinite {
+                path: path.to_path_buf(),
+                line,
+                column: index + 1,
+                field: field.to_string(),
+            });
+        }
         return Ok(value);
     }
     // Before calling it junk: is it a number with the wrong decimal separator? Saying so is the
