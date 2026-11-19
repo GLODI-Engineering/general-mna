@@ -964,3 +964,90 @@ fn v_gs_th_is_read_from_the_deck() {
         })
     );
 }
+
+/// One number grammar: a block field takes the SPICE suffixes a device value already takes.
+///
+/// GLODI-Engineering/general-simulator#57. `red=300n` -- three hundred nanoseconds of dead
+/// time, the natural way to write it -- used to fail with `field 'red' is not a number`, about
+/// a number, because block fields went through a plain `f64::parse` while device values and
+/// `kind=rule` fields went through the SPICE-suffix parser. A dead time nobody can spell is a
+/// dead time nobody sets correctly.
+#[test]
+fn a_block_field_takes_the_same_suffixes_a_device_value_does() {
+    let suffixed = "\
+V1 1 0 5
+R1 1 0 1k
+DUTY kind=const value=0.4
+PWM1 kind=pwm freq=100k in=DUTY red=300n fed=300n
+";
+    let plain = "\
+V1 1 0 5
+R1 1 0 1000
+DUTY kind=const value=0.4
+PWM1 kind=pwm freq=100000 in=DUTY red=300e-9 fed=300e-9
+";
+
+    let from_suffixed = build_system(suffixed, Dialect::Ngspice).unwrap();
+    let from_plain = build_system(plain, Dialect::Ngspice).unwrap();
+
+    let pwm_of = |system: &System| match &system
+        .blocks
+        .iter()
+        .find(|b| b.name == "PWM1")
+        .expect("the modulator")
+        .kind
+    {
+        BlockKind::Pwm {
+            freq_hz, red, fed, ..
+        } => (*freq_hz, *red, *fed),
+        other => panic!("expected a Pwm, got {other:?}"),
+    };
+
+    // Bit-exact, not merely close: `300n` and `300e-9` are the same f64, and `100k` is the
+    // same as `100000`.
+    assert_eq!(pwm_of(&from_suffixed), pwm_of(&from_plain));
+    assert_eq!(pwm_of(&from_suffixed), (100_000.0, 300e-9, 300e-9));
+}
+
+/// `M` is milli and mega is `MEG`, in a block field as everywhere else.
+///
+/// The one case worth pinning by itself, because it is the suffix that silently means something
+/// else than a reader expects -- `GOTCHA-003` in the engine's own index exists for it.
+#[test]
+fn a_block_field_reads_m_as_milli_and_meg_as_mega() {
+    let source = "\
+V1 1 0 5
+R1 1 0 1k
+A kind=const value=1m
+B kind=const value=1meg
+";
+    let system = build_system(source, Dialect::Ngspice).unwrap();
+    let value_of = |name: &str| match &system
+        .blocks
+        .iter()
+        .find(|b| b.name == name)
+        .expect("the block")
+        .kind
+    {
+        BlockKind::Const(ConstValue::Scalar(v)) => *v,
+        other => panic!("expected a scalar Const, got {other:?}"),
+    };
+    assert_eq!(value_of("A"), 1e-3);
+    assert_eq!(value_of("B"), 1e6);
+}
+
+/// A field that is not a number in any grammar still says so.
+#[test]
+fn a_block_field_that_is_not_a_number_is_still_refused() {
+    let source = "\
+V1 1 0 5
+R1 1 0 1k
+DUTY kind=const value=0.4
+PWM1 kind=pwm freq=100k in=DUTY red=soon
+";
+    let err = build_system(source, Dialect::Ngspice).unwrap_err();
+    assert!(
+        err.contains("field 'red' is not a number"),
+        "unexpected error: {err}"
+    );
+}
