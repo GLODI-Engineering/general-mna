@@ -159,11 +159,19 @@ impl TransientFunction {
                 pw,
                 per,
             } => {
-                let t = if t < *td {
-                    0.0
-                } else {
-                    (t - td) % per.max(f64::EPSILON)
-                };
+                // Before the delay the source sits at its initial value. This returns
+                // early rather than clamping the local clock to zero, which is what it used
+                // to do: with `tr == 0` -- the default, and how a pulsed source is ordinarily
+                // written -- `0.0 < tr` is false, so a clamped clock fell through to the
+                // `t < tr + pw` arm and answered with the *pulsed* value before the pulse
+                // existed. A gate that should have been off until `td` was on from t = 0, and
+                // the run completed with a plausible-looking waveform. With `tr > 0` the old
+                // form happened to be right, because the rise formula evaluates to `v1` at a
+                // local time of zero -- which is why this survived.
+                if t < *td {
+                    return *v1;
+                }
+                let t = (t - td) % per.max(f64::EPSILON);
                 if t < *tr {
                     if *tr <= 0.0 {
                         *v2
@@ -449,6 +457,53 @@ mod tests {
     fn non_function_tokens_return_none() {
         assert!(TransientFunction::parse(&toks("10")).is_none());
         assert!(TransientFunction::parse(&toks("DC 5")).is_none());
+    }
+
+    #[test]
+    fn pulse_sits_at_v1_before_its_delay() {
+        // V1=3 V2=7 TD=0.02 TR=0 TF=0 PW=0.01 PER=0.04 -- the measured case from #39, with
+        // `tr == 0`, which is the default and the ordinary way to write a pulsed source.
+        // By hand, from SPICE PULSE semantics: v1 on [0, td), v2 on [td, td+pw), v1 again
+        // until the next period begins at td+per.
+        let tf = TransientFunction::parse(&toks("PULSE(3 7 0.02 0 0 0.01 0.04)")).unwrap();
+
+        // Sampled strictly inside each interval. The interval ends (t = td + pw exactly)
+        // land on a floating-point comparison against `tr + pw` and are not what this test
+        // is about -- `pulse_matches_hand_computed_trapezoid` already pins the shape.
+        assert_eq!(tf.value_at(0.0), 3.0, "at t=0, before the delay");
+        assert_eq!(tf.value_at(0.005), 3.0);
+        assert_eq!(tf.value_at(0.015), 3.0, "still before the delay");
+        assert_eq!(
+            tf.value_at(0.021),
+            7.0,
+            "just after td: the pulse has started"
+        );
+        assert_eq!(tf.value_at(0.025), 7.0, "mid-pulse");
+        assert_eq!(tf.value_at(0.0305), 3.0, "just past td + pw: back to v1");
+        assert_eq!(tf.value_at(0.05), 3.0, "still low inside the first period");
+        assert_eq!(
+            tf.value_at(0.0605),
+            7.0,
+            "just past td + per: the second pulse"
+        );
+    }
+
+    #[test]
+    fn pulse_sits_at_v1_before_its_delay_with_a_real_rise_time() {
+        // The same check with TR > 0, which the old implementation got right by accident --
+        // its clamped local clock made the rise formula evaluate to v1. Both paths are
+        // pinned now so a future rewrite cannot restore the old behaviour for either.
+        let tf = TransientFunction::parse(&toks("PULSE(3 7 0.02 0.004 0 0.01 0.04)")).unwrap();
+
+        assert_eq!(tf.value_at(0.0), 3.0);
+        assert_eq!(tf.value_at(0.019), 3.0, "the rise has not started yet");
+        assert_eq!(tf.value_at(0.02), 3.0, "at td the rise begins from v1");
+        let mid = tf.value_at(0.022);
+        assert!(
+            (mid - 5.0).abs() < 1e-12,
+            "mid-rise should be half of 3 -> 7, got {mid}"
+        );
+        assert_eq!(tf.value_at(0.0245), 7.0, "just past the end of the rise");
     }
 
     #[test]
