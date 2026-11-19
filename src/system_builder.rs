@@ -939,9 +939,9 @@ fn build_kind(stmt: &general_spice_core::ast::BlockInstance) -> Result<Kind, Str
                 .map_err(|error| format!("line {}: device '{name}': {error}", line_number + 1))?;
             let mut output_names = table.names;
             // `output_names[0]` aliases the block's own name, as it does for every other
-            // multi-output kind -- otherwise the first channel would be addressable only as
-            // `SCOPE.CH1` while `SCOPE` named nothing, and a single-column capture would need a
-            // dotted name to be used at all.
+            // multi-output kind -- otherwise `SCOPE` would name nothing at all while its first
+            // channel answered to the header's name, and a single-column capture could not be
+            // referred to by the name its own netlist line gave it.
             if let Some(first) = output_names.first_mut() {
                 *first = name.to_string();
             }

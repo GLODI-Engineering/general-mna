@@ -74,7 +74,8 @@ fn a_netlist_line_reads_a_capture_off_disk() {
 }
 
 /// A two-channel capture is one block with two outputs, named by the file's own header: the
-/// first aliases the block, the second is `SCOPE.CH2`.
+/// first aliases the block's own name, the second is a top-level signal name of its own (`VOUT`,
+/// not `SCOPE.VOUT`) -- the convention every other multi-output block kind already follows.
 #[test]
 fn a_two_channel_capture_is_one_block_with_two_named_outputs() {
     let capture = Capture::new("two-channel", "TIME,VGS,VOUT\n0,0,0\n1e-6,10,4.9\n");

@@ -447,8 +447,14 @@ pub enum BlockKind {
     /// project deliberately does not have.
     ///
     /// Multi-output, following the [`BlockKind::CScript`] convention: `output_names[0]` aliases
-    /// this block's own name and the rest are addressed `<block>.<name>`, so a two-channel
-    /// capture read as `SCOPE` offers `SCOPE` (the first channel) and `SCOPE.CH2`.
+    /// this block's own name, and **the rest are top-level signal names of their own** — not
+    /// `<block>.<name>`. A two-channel capture read as `SCOPE` therefore offers `SCOPE` (the
+    /// first channel) and `CH2` (the second), each nameable anywhere a signal is.
+    ///
+    /// That makes a header-derived name a claim on the signal namespace, so a capture whose
+    /// second column is headed `OUT` claims `OUT`. A clash with a block that already has that
+    /// name is a hard error (`DuplicateBlockName`) rather than one silently winning, and
+    /// `outputs=` is how it is resolved.
     ///
     /// ## Parameters
     /// - `path=<file>` — required. A relative path resolves against the **process's working
@@ -491,7 +497,7 @@ pub enum BlockKind {
     /// ```text
     /// SCOPE kind=filewave path=capture.csv outputs=VGS,VOUT
     /// GATE  kind=sig2phys domain=voltage in=SCOPE
-    /// M_fit kind=measure type=error out=V(out) ref=SCOPE.VOUT norm=l2
+    /// M_fit kind=measure type=error out=V(out) ref=VOUT norm=l2
     /// ```
     FileWave {
         /// One `(time, value)` breakpoint list per output, already shifted, scaled and offset.

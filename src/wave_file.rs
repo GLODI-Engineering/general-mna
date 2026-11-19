@@ -27,7 +27,8 @@
 //!    header — a sniffer that had to recognise each of them would be wrong about the fifth.
 //! 2. **The column header becomes the output's name.** The last preamble line with the same
 //!    field count as the data is the header, so a Rigol `X,CH1,CH2` yields outputs `CH1` and
-//!    `CH2`, and a measurement reads `ref=SCOPE.CH1` instead of `ref=SCOPE.c1`.
+//!    `CH2` -- and since those are top-level signal names, a measurement reads `ref=CH2`
+//!    instead of `ref=c3`.
 //! 3. **The time base is shifted to zero by default.** A scope export is centred on the
 //!    trigger, so its time column starts negative — commonly at `-5 ms` for a 10 ms window. A
 //!    capture that silently began before `t = 0` would put an entire comparison half a window
@@ -657,7 +658,7 @@ mod tests {
     }
 
     /// The plain case, and the one thing about it that is not plain: the header's names become
-    /// the outputs' names, so a measurement can say `ref=SCOPE.CH1`.
+    /// the outputs' names, so a measurement can say `ref=CH1` rather than `ref=c2`.
     #[test]
     fn a_two_column_csv_loads_with_its_header_as_the_output_name() {
         let table = load_text("Time,CH1\n0,0\n1e-6,5\n2e-6,0\n").unwrap();
