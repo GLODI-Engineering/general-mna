@@ -2,10 +2,9 @@
 name = "general-mna"
 version = "0.6.0"
 edition = "2021"
-description = "Educational modified nodal analysis and converter averaging built on general-spice-core"
+description = "Modified nodal analysis, symbolic converter averaging and state-space reduction for SPICE netlists"
 license = "AGPL-3.0-or-later"
 repository = "https://github.com/GLODI-Engineering/general-mna"
-homepage = "https://github.com/GLODI-Engineering/general-mna"
 documentation = "https://docs.rs/general-mna"
 readme = "README.md"
 keywords = ["spice", "circuit-simulation", "mna", "electronics"]

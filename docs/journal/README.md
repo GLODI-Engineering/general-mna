@@ -1,6 +1,6 @@
 # Agent work journal
 
-This is the chronological continuity log for `elspice-mna`: more concrete than
+This is the chronological continuity log for `general-mna`: more concrete than
 commit messages and less formal than architecture decisions. Read the newest
 month's top entry before continuing prior work.
 

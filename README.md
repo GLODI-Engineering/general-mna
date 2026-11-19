@@ -1,28 +1,51 @@
 # general-mna
 
-`general-mna` is an educational Rust library that converts a SPICE netlist
-into the modified nodal analysis (MNA) descriptor equation
+[![crates.io](https://img.shields.io/crates/v/general-mna.svg)](https://crates.io/crates/general-mna)
+[![docs.rs](https://img.shields.io/docsrs/general-mna)](https://docs.rs/general-mna)
+
+`general-mna` converts a SPICE netlist into the modified nodal analysis (MNA)
+descriptor equation
 
 ```text
 A x(t) + K dx(t)/dt = B u(t)
 ```
 
+and reduces that system, symbolically or numerically, to a state space. It is
+the MNA assembler behind the
+[general-simulator](https://github.com/GLODI-Engineering/general-simulator)
+engine, which calls it to stamp the linear part of a circuit once per solver
+mode, and it is used on its own for symbolic converter work -- the averaged
+state-space models and the PDFs under `artifacts/` are produced by this crate
+and SymPy, not by a simulation.
+
+```toml
+[dependencies]
+general-mna = "0.6"
+```
+
+The API reference is at [docs.rs/general-mna](https://docs.rs/general-mna).
+
 It deliberately separates three jobs:
 
-1. [`general-spice-core`](../spice-lsp/servers/core) parses ngspice or Xyce text.
+1. [`general-spice-core`](https://github.com/GLODI-Engineering/spice-lsp/tree/main/servers/core)
+   parses ngspice or Xyce text.
 2. This crate constructs symbolic MNA matrices and converter phase models.
-3. A thin Python/PyO3 or JavaScript/WASM package can render PDFs, hand the
-   expressions to SymPy, or drive an interactive state-space application.
+3. The PyO3 binding under [`python/`](python) hands those expressions to SymPy,
+   which is how the verified converter examples below are generated. The same
+   DTO is what a `wasm-bindgen` front end would export.
 
 The old Python ElSpice project was used as a behavioral reference. It is not
-modified or imported by this repository.
+modified or imported by this repository -- but the binding is still packaged
+under its name, `elspice_mna`, which is a leftover rather than a decision; see
+[#37](https://github.com/GLODI-Engineering/general-mna/issues/37).
 
 ## Implemented
 
 - Symbolic stamps for `R`, `C`, `L`, `V`, `I`, `G` (VCCS), `E` (VCVS), `F`
   (CCCS), and `H` (CCVS).
 - Time-varying `V`/`I` sources — `SIN`/`PULSE`/`EXP`/`PWL`/`SFFM`, the same five forms common to
-  both ngspice and Xyce (see `spice-lsp/docs/GRAMMAR.md`). This crate has no notion of "now": a
+  both ngspice and Xyce (see
+  [`GRAMMAR.md`](https://github.com/GLODI-Engineering/spice-lsp/blob/main/docs/GRAMMAR.md)). This crate has no notion of "now": a
   source using one of these is stamped as a per-instance symbol (`Expression::symbol(name)`,
   the same pattern diode Norton currents already use below) rather than a baked literal, and
   `MnaSystem::transient_sources` exposes the parsed `TransientFunction` for the caller to
@@ -270,7 +293,8 @@ a mandatory title line.
 
 `MnaBuilder::build_fragment` above only sees electrical elements. A netlist may also declare
 `kind=...` block/signal-domain statements (PID compensators, PWM modulators, logic, coordinate
-transforms — see `spice-lsp/docs/GRAMMAR.md` §12) and `.subckt`/`X`-instance hierarchy. For
+transforms — see
+[`GRAMMAR.md`](https://github.com/GLODI-Engineering/spice-lsp/blob/main/docs/GRAMMAR.md) §12) and `.subckt`/`X`-instance hierarchy. For
 those, use `build_system` instead — it flattens hierarchy, builds the electrical `MnaSystem`,
 and dispatches every block statement, all in one call:
 
@@ -337,20 +361,20 @@ idealized educational switch without implementing a MOS compact model.
 `U` arrays plus unknown/input names. The expression syntax (`+`, `*`, `/`, and
 `sqrt`) is accepted by SymPy and common JavaScript math-expression libraries.
 
-A future PyO3 wrapper only needs to expose:
+The DTO a wrapper needs is exactly one call:
 
 ```text
 build_fragment(source, dialect, switch_states) -> StringMnaSystem
 ```
 
-The same DTO can be exported by `wasm-bindgen` for a browser application. Keep
-symbolic matrix reduction in SymPy; use this crate's numeric reduction for an
-interactive browser after parameter values are supplied.
+That is what the PyO3 binding below exposes, and what a `wasm-bindgen` front
+end would export for a browser. Keep symbolic matrix reduction in SymPy; use
+this crate's numeric reduction once parameter values are supplied.
 
 ### Native Python binding
 
-The optional PyO3 module exposes both symbolic MNA construction and native
-numeric state-space reduction:
+The PyO3 module -- behind the optional `python` feature -- exposes both
+symbolic MNA construction and native numeric state-space reduction:
 
 ```bash
 ./python/build_binding.sh
@@ -359,7 +383,11 @@ PYTHONPATH=python python3 -c \
 ```
 
 For a packaged installation, `python/pyproject.toml` is configured for
-Maturin and builds the same `elspice_mna._native` module.
+Maturin and builds the same `elspice_mna._native` module. The package name is
+the retired predecessor project's, not this one's; renaming it moves the
+notebooks, the scripts and the generated reports with it, so it is tracked
+separately in [#37](https://github.com/GLODI-Engineering/general-mna/issues/37)
+rather than changed here.
 
 ## Verified converter examples
 
@@ -394,11 +422,12 @@ The parser dependency is currently a sibling path so local parser work is used
 immediately without editing either repository:
 
 ```toml
-general-spice-core = { path = "../spice-lsp/servers/core" }
+general-spice-core = { path = "../spice-lsp/servers/core", version = "0.1.0" }
 ```
 
-Once `general-spice-core` has a published version or stable Git tag, replace the path
-with that immutable dependency for portable builds.
+`general-spice-core` is published, so the manifest carries both: the path wins
+for a local checkout with the sibling repository beside it, and the `version`
+is what a build from crates.io resolves.
 
 Quality gates:
 
