@@ -1,9 +1,9 @@
 ---
 name: record-gotcha
-description: Record a reproducible, non-obvious elspice-mna parser, matrix, binding, toolchain, or artifact-generation trap as institutional memory. Use when a discovery would cost a future contributor meaningful time to rediscover.
+description: Record a reproducible, non-obvious general-mna parser, matrix, binding, toolchain, or artifact-generation trap as institutional memory. Use when a discovery would cost a future contributor meaningful time to rediscover.
 ---
 
-# Record an elspice-mna gotcha
+# Record an general-mna gotcha
 
 Do not use this for a typo, an issue already explained by the current task, or
 an unverified suspicion. Use it for a reproducible failure whose symptom does

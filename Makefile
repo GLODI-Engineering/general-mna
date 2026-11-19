@@ -20,5 +20,5 @@ test: binding
 	PYTHONPATH=python python3 -W error scripts/validate_notebooks.py
 
 clean-generated:
-	rm -f python/elspice_mna/_native.so
+	rm -f python/general_mna/_native.so
 	rm -f artifacts/*.aux artifacts/*.log artifacts/*.out
