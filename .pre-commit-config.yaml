@@ -9,10 +9,14 @@ repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v5.0.0
     hooks:
+      # `tests/fixtures/scope-exports/` is excluded from every whitespace hook below: its
+      # files are capture fixtures whose exact bytes are the test. One is CRLF with a
+      # trailing blank line because that is what a Windows-side export writes, and a fixer
+      # that tidied it would rewrite the fixture into the clean case it exists to not be.
       - id: trailing-whitespace
-        exclude: \.md$
+        exclude: '(\.md$|^tests/fixtures/scope-exports/)'
       - id: end-of-file-fixer
-        exclude: '^(notebooks/|artifacts/)'
+        exclude: '^(notebooks/|artifacts/|tests/fixtures/scope-exports/)'
       - id: check-yaml
       - id: check-json
       - id: check-toml
@@ -22,6 +26,7 @@ repos:
       - id: check-case-conflict
       - id: mixed-line-ending
         args: ["--fix=lf"]
+        exclude: '^tests/fixtures/scope-exports/'
 
   - repo: local
     hooks:

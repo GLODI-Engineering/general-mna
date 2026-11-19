@@ -1,0 +1,10 @@
+# Capture fixtures: the exact bytes are the test.
+#
+# `tests/fixtures/scope-exports/` holds synthetic oscilloscope exports, and what each one
+# tests is partly its byte-level shape -- one is CRLF with a trailing blank line because that
+# is what an export written on Windows looks like, and the rest are LF. A checkout with
+# `core.autocrlf=true` would convert all of them in one direction or the other and quietly
+# turn the corpus into nineteen copies of the same line ending.
+#
+# `-text` means no conversion in either direction, on any platform.
+tests/fixtures/scope-exports/** -text
