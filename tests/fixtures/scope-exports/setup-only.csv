@@ -1,0 +1,7 @@
+Model,SYNTHETIC-2CH
+Firmware,0.0.0-synthetic
+Channel,CH1
+Coupling,DC
+Probe Attenuation,x10
+Vertical Scale,one volt per division
+Horizontal Scale,one millisecond per division
