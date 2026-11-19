@@ -19,7 +19,7 @@ parameter evaluation
 NumericMnaSystem         ->  Schur reduction -> NumericStateSpace
 ```
 
-The parser remains the authority for dialect syntax. `elspice-mna` only
+The parser remains the authority for dialect syntax. `general-mna` only
 interprets linear element instances and therefore does not duplicate netlist
 lexing or statement parsing.
 
