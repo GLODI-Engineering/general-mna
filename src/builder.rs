@@ -428,6 +428,20 @@ impl MnaBuilder {
                 for (name, raw_value) in &param.assignments {
                     if let Ok(value) = Expression::parse_scalar(raw_value) {
                         parameter_defaults.insert(name.clone(), value);
+                    } else if crate::expression::is_non_finite_number(raw_value) {
+                        // A hard error rather than the warning below, because the warning
+                        // drops the default and every device written `{name}` then reads as an
+                        // undeclared symbol -- reported much later, somewhere else, as a
+                        // missing symbol. A non-finite default is the one case here that is
+                        // certainly wrong rather than merely unsupported (#54).
+                        return Err(BuildError::InvalidParam {
+                            line: param.span.start,
+                            name: name.clone(),
+                            message: format!(
+                                "value '{raw_value}' is not a finite number; a netlist value \
+                                 must be finite"
+                            ),
+                        });
                     } else {
                         warnings.push(format!(
                             "parameter '{name}' has an expression that is preserved by general-spice-core but is not a scalar MNA value"
@@ -904,7 +918,7 @@ fn field_error(element: &ElementInstance, message: String) -> BuildError {
 /// symbol resolved later from `.param`, or a braced expression. Not a judgement about physical
 /// units, only about shape.
 fn is_value_token(token: &str) -> bool {
-    Expression::parse_scalar(token).is_ok()
+    Expression::parse_scalar(token).is_ok() || crate::expression::is_non_finite_number(token)
 }
 
 /// Validates the positional parameters of an independent source card (`V`/`I`).
@@ -1337,6 +1351,18 @@ pub enum BuildError {
         /// Explanation, already phrased to follow `device '<name>' `.
         message: String,
     },
+    /// A `.param`/`.global_param` assignment this crate cannot start from. Only used where
+    /// the value is certainly wrong rather than merely beyond this crate's expression
+    /// support: a value that is not finite (see [`crate::expression::parse_spice_number`]),
+    /// which would otherwise reach the matrix through every device that names the parameter.
+    InvalidParam {
+        /// 1-based physical line of the `.param` statement.
+        line: usize,
+        /// The parameter's name.
+        name: String,
+        /// Explanation, already phrased to follow `parameter '<name>' `.
+        message: String,
+    },
     /// Two branch devices have the same case-insensitive name.
     DuplicateElement(String),
     /// A current-controlled source refers to a device without a branch current.
@@ -1378,6 +1404,11 @@ impl fmt::Display for BuildError {
                 name,
                 message,
             } => write!(f, "line {line}: device '{name}' {message}"),
+            Self::InvalidParam {
+                line,
+                name,
+                message,
+            } => write!(f, "line {line}: parameter '{name}' {message}"),
             Self::DuplicateElement(name) => {
                 write!(f, "duplicate case-insensitive element name '{name}'")
             }

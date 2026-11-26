@@ -132,6 +132,13 @@ impl Expression {
         }
         match parse_spice_number(trimmed) {
             Some(value) => Ok(Self::Constant(value)),
+            // Before the symbol fallback: `nan` and `inf` are simple symbols by spelling, so
+            // without this they would be read as the names of parameters nothing declares and
+            // reported, much later and somewhere else, as a missing symbol called `nan`.
+            None if is_non_finite_number(trimmed) => Err(format!(
+                "value '{trimmed}' is not a finite number; a netlist value must be finite (an \
+                 open branch is written by leaving the device out, not by an infinite value)"
+            )),
             None if is_simple_symbol(trimmed) => Ok(Self::Symbol(trimmed.to_string())),
             None => Err(format!(
                 "unsupported scalar expression '{raw}'; use a number or symbol"
@@ -481,7 +488,47 @@ fn is_simple_symbol(value: &str) -> bool {
         && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '$' | '.'))
 }
 
+/// The netlist's number grammar: a SPICE number with or without a magnitude suffix, and
+/// nothing that is not finite.
+///
+/// Rust's own float parser accepts `nan`, `inf` and `-inf`, and #43 made this function the
+/// single grammar for every number a netlist carries — device values, `kind=` block fields,
+/// `kind=rule` fields — so that acceptance was uniform and silent. What it cost is recorded on
+/// #54 and measured in `tests/non_finite_numbers.rs`: a NaN conductance reaches the matrix and
+/// the solve then returns NaN for *every* unknown, including branches the offending device is
+/// not in, with nothing in the output naming it; a NaN source value is dropped by
+/// `MnaSystem::evaluate` and the deck quietly simulates as though the source were $0$; and
+/// `inf`, which looks the most deliberate of the three, stamps a conductance of exactly $0$ —
+/// a silent open circuit, and a singular system rather than the open branch intended. An open
+/// branch is written by leaving the device out.
+///
+/// Refusing it here rather than at each field reader makes every caller finite-only at once
+/// and leaves each one's own message — which names the line, the device and the field — to do
+/// the reporting. No field wants an infinity today; `pw`/`per`/`td2` spell "effectively
+/// unbounded" as `f64::MAX / 4.0` rather than as an infinity, deliberately. A caller that one
+/// day genuinely wants one asks [`parse_spice_number_allowing_non_finite`], as the capture
+/// loader does so that it can name the file, line and column itself.
 pub(crate) fn parse_spice_number(raw: &str) -> Option<f64> {
+    parse_spice_number_allowing_non_finite(raw).filter(|value| value.is_finite())
+}
+
+/// True when `raw` is shaped like this grammar's number but is refused by
+/// [`parse_spice_number`] only for not being finite.
+///
+/// For a caller that asks about *shape* alone — `builder::is_value_token`, deciding whether a
+/// token is in the position of a value at all — so that `V1 in 0 nan` is reported by the
+/// reader of that value, which can say what is wrong with it, rather than as a card whose
+/// third token is in an unexpected position.
+pub(crate) fn is_non_finite_number(raw: &str) -> bool {
+    let trimmed = raw
+        .trim()
+        .trim_matches(|c| matches!(c, '{' | '}' | '\'' | '"'));
+    parse_spice_number_allowing_non_finite(trimmed).is_some_and(|value| !value.is_finite())
+}
+
+/// [`parse_spice_number`] without its finiteness refusal. Only for a caller that needs to
+/// *see* a non-finite value in order to name it where it was written.
+pub(crate) fn parse_spice_number_allowing_non_finite(raw: &str) -> Option<f64> {
     if let Ok(value) = raw.parse::<f64>() {
         return Some(value);
     }
