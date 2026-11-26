@@ -1,6 +1,6 @@
 [package]
 name = "general-mna"
-version = "0.9.0"
+version = "0.10.0"
 edition = "2021"
 description = "Modified nodal analysis, symbolic converter averaging and state-space reduction for SPICE netlists"
 license = "AGPL-3.0-or-later"
@@ -27,5 +27,5 @@ pyo3 = { version = "0.27", features = ["extension-module"], optional = true }
 # published, and is required for `cargo publish` of general-mna itself to succeed at all
 # (crates.io ignores `path`, needs `version`).
 general-spice-core = { path = "../spice-lsp/servers/core", version = "0.1.0" }
-continuous-blocks = { path = "../general-simulator/crates/continuous-blocks", version = "0.9.0" }
-pwl-devices = { path = "../general-simulator/crates/pwl-devices", version = "0.9.0" }
+continuous-blocks = { path = "../general-simulator/crates/continuous-blocks", version = "0.10.0" }
+pwl-devices = { path = "../general-simulator/crates/pwl-devices", version = "0.10.0" }
