@@ -1,6 +1,6 @@
 [package]
 name = "general-mna"
-version = "0.7.0"
+version = "0.8.0"
 edition = "2021"
 description = "Modified nodal analysis, symbolic converter averaging and state-space reduction for SPICE netlists"
 license = "AGPL-3.0-or-later"
