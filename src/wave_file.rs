@@ -55,7 +55,7 @@ use std::collections::BTreeSet;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-use crate::expression::parse_spice_number;
+use crate::expression::parse_spice_number_allowing_non_finite;
 
 /// Which column, by position or by the name its header gave it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -516,7 +516,8 @@ fn starts_with_a_number(line: &str, delimiter: Option<char>) -> bool {
             // later. Treating it as preamble instead would skip every row of the file and
             // report "no line in it begins with a number", which is true and useless -- the
             // user needs to be told about the separator, not about the absence of data.
-            parse_spice_number(field).is_some() || looks_like_a_decimal_comma(field)
+            parse_spice_number_allowing_non_finite(field).is_some()
+                || looks_like_a_decimal_comma(field)
         })
         .unwrap_or(false)
 }
@@ -637,11 +638,9 @@ fn number_at(
     path: &Path,
 ) -> Result<f64, WaveFileError> {
     let field = fields[index];
-    if let Some(value) = parse_spice_number(field) {
-        // `parse_spice_number` falls back to Rust's own float parser, which accepts `nan`,
-        // `inf` and `-inf`. For a netlist field that is a question for another day; for a
-        // capture it is not a question at all, and letting one through is worse than it
-        // sounds in both columns:
+    if let Some(value) = parse_spice_number_allowing_non_finite(field) {
+        // Rust's own float parser, which this grammar falls back to, accepts `nan`, `inf`
+        // and `-inf`. Letting one through is worse than it sounds in both columns:
         //
         //   * a NaN **value** becomes a breakpoint, and the first step that interpolates
         //     across that segment returns NaN for the rest of the run, with nothing anywhere
@@ -652,9 +651,10 @@ fn number_at(
         //     unspecified index on an unsorted slice -- so the waveform is not wrong in some
         //     bounded way, it is arbitrary.
         //
-        // Refused here rather than in `parse_spice_number` so that only the loader's contract
-        // changes: this is the one place every time and every value in a capture passes
-        // through.
+        // `parse_spice_number` itself refuses a non-finite value since #54, but this loader
+        // asks `parse_spice_number_allowing_non_finite` so that it keeps *this* refusal: the
+        // one that names the file, the line and the column, which a message about a netlist
+        // field cannot.
         if !value.is_finite() {
             return Err(WaveFileError::NotFinite {
                 path: path.to_path_buf(),

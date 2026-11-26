@@ -67,6 +67,11 @@ modified or imported by this repository, and nothing here carries its name.
 - Case-insensitive node, element, and controlling-source lookup.
 - **One device per name.** Element names share a single case-insensitive namespace, checked over every device letter before anything is stamped. Two cards of one name are a build error, not a silently merged pair -- see [`docs/gotchas/GOTCHA-001`](docs/gotchas/GOTCHA-001-duplicate-element-name-only-checked-for-unknown-bearing-letters.md) for why the numbers used to come out right anyway. Subcircuit bodies are checked after flattening, so two instances of one `.subckt` are fine.
 - SPICE numeric suffixes (`k`, `meg`, `m`, `u`, `n`, `p`, and others).
+- **Every netlist number is finite.** `nan`, `inf` and `-inf` are refused wherever a field
+  asks for a number -- a device value, a `kind=` block field, a `.param` default, a waveform
+  argument -- naming the line, the device and the field. They used to build without a word
+  and then poison the solution with nothing pointing at the device that caused it. An open
+  branch is written by leaving the device out, not by an infinite value.
 - Explicit errors for devices with no linear-or-externally-parameterized
   stamp (e.g. a BJT); they are never silently removed from a circuit.
 - Name-based `Ron`/`Roff` switch overrides suitable for converter phases.
