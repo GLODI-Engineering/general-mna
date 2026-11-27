@@ -30,6 +30,21 @@
 //! the same body) still surfaces as the same `UnknownBlockInput` error it always has, just after
 //! expansion instead of before.
 //!
+//! **Formal parameters**: a `.subckt`'s header may declare parameters with defaults
+//! (`.subckt rpart p n Rv=1000`) and an `X` call may override them (`X1 a b rpart Rv=100`).
+//! Both halves parse, and until general-mna#63 neither was *bound*: the body's `{Rv}` reached
+//! the builder as the name of a parameter nothing declared, and the solve failed with a missing
+//! symbol. [`expand_body`] now carries a parameter scope beside its `port_map`, built by
+//! [`bind_params`] from the definition's declared defaults overridden by the call site's
+//! `name=value` tail, and substitutes it into every expression segment it expands — so `{Rv}`
+//! inside the body becomes `{100}` for one instance and `{220}` for the next.
+//!
+//! The scope **shadows rather than extends**: a body sees its own formals and whatever is
+//! global, never the caller's formals, which is SPICE's own rule and the only one under which a
+//! definition means the same thing wherever it is called from. An override naming a parameter
+//! the definition does not declare is refused rather than ignored, because a dropped override
+//! is a silently different circuit.
+//!
 //! **`.IC` inside a body**: a `.IC V(<node>)=` / `V(<n1>,<n2>)=` / `I(<element>)=` written inside
 //! a `.subckt` names that body's own nodes and elements, so each target goes through the very
 //! same resolution ([`mangle_ic_target`]) before the builder's unknown-name check sees it.
@@ -47,7 +62,7 @@ use general_spice_core::ast::{BlockInstance, ElementInstance, Statement, Subckt}
 /// to handle.
 pub fn flatten(statements: &[Statement]) -> Result<Vec<Statement>, String> {
     let (defs, root) = split_definitions(statements)?;
-    expand_body(&root, &defs, "", &HashMap::new(), &[])
+    expand_body(&root, &defs, "", &HashMap::new(), &HashMap::new(), &[])
 }
 
 /// One `.subckt` definition: its own header (name/port list/params) plus every statement
@@ -111,14 +126,18 @@ fn split_definitions(statements: &[Statement]) -> Result<(Definitions, Vec<State
 /// resolves this body's own port *names* (as declared in its `.subckt` header) to whatever the
 /// caller actually bound them to (already-fully-resolved names, from the caller's own
 /// perspective — resolution composes correctly across nesting depth because each level only
-/// ever needs to resolve its own immediate ports). `chain` is the list of subckt names currently
-/// being expanded, top-down, purely for cycle detection (a subckt directly or transitively
-/// instantiating itself would recurse forever otherwise).
+/// ever needs to resolve its own immediate ports). `params` is the same thing for this body's
+/// *formal parameters* — each declared name mapped to the text the call site bound it to,
+/// already resolved in the caller's own scope ([`bind_params`]) — and it replaces rather than
+/// extends the caller's, so a body sees its own formals and nothing of its caller's. `chain` is
+/// the list of subckt names currently being expanded, top-down, purely for cycle detection (a
+/// subckt directly or transitively instantiating itself would recurse forever otherwise).
 fn expand_body(
     body: &[Statement],
     defs: &Definitions,
     prefix: &str,
     port_map: &HashMap<String, String>,
+    params: &HashMap<String, String>,
     chain: &[String],
 ) -> Result<Vec<Statement>, String> {
     let resolve = |name: &str| -> String {
@@ -137,6 +156,8 @@ fn expand_body(
         }
     };
 
+    let substitute = |text: &str| -> String { substitute_params(text, params) };
+
     let mut out = Vec::new();
     for stmt in body {
         match stmt {
@@ -147,6 +168,16 @@ fn expand_body(
                         let mut mangled = ei.clone();
                         mangled.name = format!("{prefix}{}", ei.name);
                         mangled.nodes = mangled_nodes;
+                        // Every value this card carries is written in the body's own scope, so
+                        // a formal parameter named in one is resolved here, before any reader
+                        // of the card sees it. A token with no expression segment -- a model
+                        // name, a plain number, the `F`/`H` control name handled just below --
+                        // is returned unchanged, so this cannot touch what it does not mean to.
+                        mangled.raw_params = ei
+                            .raw_params
+                            .iter()
+                            .map(|value| substitute(value))
+                            .collect();
                         // An `F`/`H` card names the voltage source whose branch current
                         // controls it, and that name is scoped to the body it is written in.
                         // Flattening renames every element in that body, so the reference has
@@ -175,19 +206,46 @@ fn expand_body(
                             defs,
                             chain,
                             ei,
+                            params,
                         )?);
                     }
                 }
             }
             Statement::BlockInstance(bi) => {
-                out.push(Statement::BlockInstance(mangle_block(bi, prefix, &resolve)));
+                out.push(Statement::BlockInstance(mangle_block(
+                    bi,
+                    prefix,
+                    &resolve,
+                    &substitute,
+                )));
             }
             Statement::Ic(assignments, span) => {
                 let mangled = assignments
                     .iter()
-                    .map(|(target, value)| (mangle_ic_target(target, &resolve), value.clone()))
+                    .map(|(target, value)| (mangle_ic_target(target, &resolve), substitute(value)))
                     .collect();
                 out.push(Statement::Ic(mangled, span.clone()));
+            }
+            // A `.param` written inside a body is *not* scoped by this pass: once the hierarchy
+            // is flat its name is global, so two instances of the same definition would both
+            // declare it and whichever came last would win. That is only wrong when its value
+            // depends on a formal -- precisely the case where the two instances disagree -- so
+            // that case is refused rather than quietly resolved to one of them. A body-level
+            // `.param` that depends on nothing instance-specific means the same thing however
+            // many times it is expanded, and passes through as it always has.
+            Statement::Param(p) | Statement::GlobalParam(p) => {
+                for (name, raw) in &p.assignments {
+                    if substitute(raw) != *raw {
+                        return Err(format!(
+                            "line {}: '.param {name}' inside a .subckt body is written in terms \
+                             of a formal parameter, and a `.param` is global once the hierarchy \
+                             is flattened -- two instances would disagree about its value. Write \
+                             the expression at the use site instead.",
+                            p.span.start
+                        ));
+                    }
+                }
+                out.push(stmt.clone());
             }
             // .subckt/.ends can't appear inside a body here -- split_definitions already
             // consumed every matching pair, at every nesting depth, into `defs`.
@@ -202,8 +260,8 @@ fn expand_body(
 
 /// Expands one `X`-instance: looks up its definition, builds the port-binding map (definition's
 /// own declared ports -> the caller's already-resolved node list, positional, SPICE's own
-/// convention), checks for a recursive instantiation cycle, and recursively expands the
-/// definition's own body one level deeper.
+/// convention) and the parameter scope ([`bind_params`]), checks for a recursive instantiation
+/// cycle, and recursively expands the definition's own body one level deeper.
 fn instantiate(
     sub_name: &str,
     instance_name: &str,
@@ -211,6 +269,7 @@ fn instantiate(
     defs: &Definitions,
     chain: &[String],
     call_site: &ElementInstance,
+    caller_params: &HashMap<String, String>,
 ) -> Result<Vec<Statement>, String> {
     let Some((def, body)) = defs.get(sub_name) else {
         return Err(format!(
@@ -243,11 +302,192 @@ fn instantiate(
         .cloned()
         .zip(caller_nodes.iter().cloned())
         .collect();
+    let params = bind_params(def, call_site, caller_params)?;
     let new_prefix = format!("{instance_name}.");
     let mut new_chain = chain.to_vec();
     new_chain.push(sub_name.to_string());
 
-    expand_body(body, defs, &new_prefix, &port_map, &new_chain)
+    expand_body(body, defs, &new_prefix, &port_map, &params, &new_chain)
+}
+
+/// Binds one instance's formal parameters: every name the definition declares, mapped to the
+/// text that instance gives it, falling back to the definition's own declared default.
+///
+/// Three refusals, each because the alternative is a circuit that is quietly not the one that
+/// was written:
+///
+/// - an override naming a parameter the definition does not declare — ignoring it would solve a
+///   different circuit than the deck says, and a typo in a parameter name is exactly how that
+///   happens;
+/// - the same parameter set twice on one call, which has no defensible reading;
+/// - a declared parameter with neither a default nor a value, which would otherwise reach the
+///   builder as an undeclared symbol and be reported much later, somewhere else.
+///
+/// A call-site value is written in the *caller's* scope, so it is resolved there
+/// ([`substitute_params`] against `caller_params`) before it is bound — that is what makes
+/// `X1 a b inner Rv={Rout}` work inside a definition whose own formal is `Rout`. A *default* is
+/// written in the definition's scope and is left as text, so a default naming a global
+/// `.param` still resolves at the top level where that `.param` lives.
+fn bind_params(
+    def: &Subckt,
+    call_site: &ElementInstance,
+    caller_params: &HashMap<String, String>,
+) -> Result<HashMap<String, String>, String> {
+    let declared = |name: &str| def.params.iter().any(|(formal, _)| formal == name);
+
+    let mut given: HashMap<String, String> = HashMap::new();
+    for token in &call_site.raw_params {
+        let Some((name, value)) = token.split_once('=') else {
+            return Err(format!(
+                "line {}: device '{}' instantiates '{}' with a trailing token '{token}' that is \
+                 not <name>=<value>",
+                call_site.span.start, call_site.name, def.name
+            ));
+        };
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(format!(
+                "line {}: device '{}' instantiates '{}' with a parameter assignment '{token}' \
+                 that has no parameter name",
+                call_site.span.start, call_site.name, def.name
+            ));
+        }
+        if !declared(name) {
+            let names: Vec<&str> = def.params.iter().map(|(f, _)| f.as_str()).collect();
+            return Err(format!(
+                "line {}: device '{}' sets parameter '{name}', which '.subckt {}' does not \
+                 declare ({})",
+                call_site.span.start,
+                call_site.name,
+                def.name,
+                if names.is_empty() {
+                    "it declares no parameters".to_string()
+                } else {
+                    format!("it declares {}", names.join(", "))
+                }
+            ));
+        }
+        if given
+            .insert(
+                name.to_string(),
+                substitute_params(value.trim(), caller_params),
+            )
+            .is_some()
+        {
+            return Err(format!(
+                "line {}: device '{}' sets parameter '{name}' more than once",
+                call_site.span.start, call_site.name
+            ));
+        }
+    }
+
+    let mut bound = HashMap::new();
+    for (formal, default) in &def.params {
+        let value = match given.remove(formal) {
+            Some(value) => value,
+            None => match default {
+                Some(default) => default.clone(),
+                None => {
+                    return Err(format!(
+                        "line {}: device '{}' gives no value for '.subckt {}' parameter \
+                         '{formal}', which declares no default",
+                        call_site.span.start, call_site.name, def.name
+                    ))
+                }
+            },
+        };
+        bound.insert(formal.clone(), value);
+    }
+    Ok(bound)
+}
+
+/// Substitutes `params` into the *expression segments* of one value, leaving everything else as
+/// written: `{Rv}` becomes `{100}` and `'Rv*2'` becomes `'100*2'`, while `100k`, a model name
+/// and an `F`-card's control-source name are returned byte-identical.
+///
+/// Only `{...}` and `'...'` are rewritten, and this is a deliberate limit rather than an
+/// oversight: a bare token in a value position can be a model name, a device keyword or a
+/// behavioural-source fragment, so substituting a bare `Rv` would mean guessing which of those
+/// a three-letter token is. A netlist that wants a parameter in a value says so with the braces
+/// the grammar provides (`docs/GRAMMAR.md` §5).
+fn substitute_params(text: &str, params: &HashMap<String, String>) -> String {
+    if params.is_empty() || !text.contains(['{', '\'']) {
+        return text.to_string();
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(open) = rest.find(['{', '\'']) {
+        let close_char = if rest.as_bytes()[open] == b'{' {
+            '}'
+        } else {
+            '\''
+        };
+        out.push_str(&rest[..=open]);
+        let after = &rest[open + 1..];
+        match after.find(close_char) {
+            Some(close) => {
+                out.push_str(&substitute_identifiers(&after[..close], params));
+                out.push(close_char);
+                rest = &after[close + 1..];
+            }
+            // An unterminated segment is a malformed value, and the reader of that value says
+            // so with the line and the field named. Rewriting the fragment here would only
+            // move the complaint somewhere it makes less sense.
+            None => {
+                out.push_str(after);
+                rest = "";
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Rewrites every identifier in one expression segment that names a bound parameter. An
+/// identifier is `[A-Za-z_][A-Za-z0-9_]*`, scanned rather than split on, so `Rv` in `Rvalue`
+/// is not a match and `2*Rv` is.
+fn substitute_identifiers(segment: &str, params: &HashMap<String, String>) -> String {
+    let mut out = String::with_capacity(segment.len());
+    let mut chars = segment.chars().peekable();
+    while let Some(character) = chars.next() {
+        if !character.is_ascii_alphabetic() && character != '_' {
+            out.push(character);
+            continue;
+        }
+        let mut ident = String::from(character);
+        while let Some(&next) = chars.peek() {
+            if next.is_ascii_alphanumeric() || next == '_' {
+                ident.push(next);
+                chars.next();
+            } else {
+                break;
+            }
+        }
+        match params.get(&ident) {
+            Some(value) => out.push_str(&bound_text(value)),
+            None => out.push_str(&ident),
+        }
+    }
+    out
+}
+
+/// The text one bound value contributes *inside* an expression segment.
+///
+/// A number or a bare name goes in as itself, so the overwhelmingly common `{Rv}` with `Rv=100`
+/// becomes `{100}` and stays readable as a value. Anything else is parenthesised, because
+/// `{Rv*2}` with `Rv=3+1` would otherwise become `{3+1*2}` — a different number, silently.
+fn bound_text(value: &str) -> String {
+    let inner = value
+        .trim()
+        .trim_matches(|c| matches!(c, '{' | '}' | '\'' | '"'))
+        .trim();
+    let atomic = crate::expression::parse_spice_number(inner).is_some()
+        || (!inner.is_empty() && inner.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'));
+    if atomic {
+        inner.to_string()
+    } else {
+        format!("({inner})")
+    }
 }
 
 /// Renames a block statement's own name (mangled, unless it happens to be a bound port — same
@@ -259,6 +499,7 @@ fn mangle_block(
     bi: &BlockInstance,
     prefix: &str,
     resolve: &impl Fn(&str) -> String,
+    substitute: &impl Fn(&str) -> String,
 ) -> BlockInstance {
     const SIGNAL_FIELDS: [&str; 5] = ["in", "inputs", "ctrl", "clamp_lo_in", "clamp_hi_in"];
     // `kind=phys2sig`'s own reference fields (`node=<electrical node>`, `branch=<element name>` --
@@ -291,6 +532,12 @@ fn mangle_block(
                 .join(",");
         } else if ELECTRICAL_REF_FIELDS.contains(&key.as_str()) {
             *value = resolve(value);
+        } else {
+            // Every other field is a *value*: `freq=100k`, `gain={Kp}`, `kind=pwm`. A formal
+            // parameter named in one is resolved here for the same reason an element card's is
+            // -- a block inside a parameterised subcircuit is as much part of the circuit as a
+            // resistor, and a `{Kp}` it could not resolve would fail as an undeclared symbol.
+            *value = substitute(value);
         }
     }
     mangled
@@ -325,6 +572,89 @@ fn mangle_ic_target(target: &str, resolve: &impl Fn(&str) -> String) -> String {
 mod tests {
     use super::*;
     use general_spice_core::ast::{ElementInstance, Statement};
+
+    /// One bound scope, written the way a call site would leave it.
+    fn scope(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+        pairs
+            .iter()
+            .map(|(name, value)| (name.to_string(), value.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn a_braced_formal_becomes_the_value_the_instance_bound() {
+        let params = scope(&[("Rv", "100")]);
+        assert_eq!(substitute_params("{Rv}", &params), "{100}");
+        assert_eq!(substitute_params("'Rv*2'", &params), "'100*2'");
+        assert_eq!(substitute_params("{2*Rv + 1}", &params), "{2*100 + 1}");
+    }
+
+    #[test]
+    fn an_identifier_is_matched_whole_rather_than_by_prefix() {
+        // The reason this is scanned rather than `replace`d: `Rvalue` contains `Rv`, and a
+        // textual replace would turn `{Rvalue}` into `{100alue}` -- a value that still parses
+        // as a number in some spellings, which is the worst available outcome.
+        let params = scope(&[("Rv", "100")]);
+        assert_eq!(substitute_params("{Rvalue}", &params), "{Rvalue}");
+        assert_eq!(substitute_params("{my_Rv}", &params), "{my_Rv}");
+        assert_eq!(substitute_params("{Rv_2}", &params), "{Rv_2}");
+    }
+
+    #[test]
+    fn nothing_outside_an_expression_segment_is_touched() {
+        // A value position holds model names, keywords and device fragments as well as
+        // expressions. Substituting a bare token would mean guessing which of those a token
+        // is, so only `{...}` and `'...'` are rewritten -- and this is the assertion that says
+        // so, not a comment.
+        let params = scope(&[("Rv", "100"), ("D", "7")]);
+        for written in ["Rv", "100k", "D", "D_IDEAL", "PULSE(0 Rv 0 1n)"] {
+            assert_eq!(
+                substitute_params(written, &params),
+                written,
+                "{written} was rewritten outside an expression segment"
+            );
+        }
+        // And the same token *inside* braces is rewritten, so the test above is a statement
+        // about the delimiters rather than about the scope being empty.
+        assert_eq!(
+            substitute_params("PULSE(0 {Rv} 0 1n)", &params),
+            "PULSE(0 {100} 0 1n)"
+        );
+    }
+
+    #[test]
+    fn an_empty_scope_returns_every_value_byte_identical() {
+        // The true top level has no formals, so every deck that worked before this pass
+        // existed must come through it unchanged.
+        let empty = HashMap::new();
+        for written in ["{Rload}", "'2*Rload'", "1k", "{}", "PWL(0 0 1u 5)"] {
+            assert_eq!(substitute_params(written, &empty), written);
+        }
+    }
+
+    #[test]
+    fn a_bound_value_that_is_not_atomic_is_parenthesised() {
+        // `{Rv*2}` with `Rv=3+1` is 8, not 5. Without the parentheses the substitution would
+        // make it 5 and nothing would say a word.
+        assert_eq!(bound_text("100"), "100");
+        assert_eq!(bound_text("100k"), "100k");
+        assert_eq!(bound_text("-1e-3"), "-1e-3");
+        assert_eq!(bound_text("Rload"), "Rload");
+        assert_eq!(bound_text("3+1"), "(3+1)");
+        assert_eq!(bound_text("{3+1}"), "(3+1)");
+        let params = scope(&[("Rv", "3+1")]);
+        assert_eq!(substitute_params("{Rv*2}", &params), "{(3+1)*2}");
+    }
+
+    #[test]
+    fn an_unterminated_segment_is_left_for_the_reader_of_the_value_to_refuse() {
+        // Not substituted, and that is the point: an unterminated `{` is a malformed value,
+        // and the field's own reader names the line and the field when it refuses it. Guessing
+        // where the expression was meant to end would move the complaint somewhere it makes
+        // less sense, and `{100` is no more valid than `{Rv`.
+        let params = scope(&[("Rv", "100")]);
+        assert_eq!(substitute_params("{Rv", &params), "{Rv");
+    }
 
     fn element(letter: char, name: &str, nodes: &[&str]) -> Statement {
         Statement::ElementInstance(ElementInstance {
