@@ -45,6 +45,14 @@
 //! the definition does not declare is refused rather than ignored, because a dropped override
 //! is a silently different circuit.
 //!
+//! **A `.param` or a `.model` inside a body** is *not* scoped by this pass, and cannot be: both
+//! names are global once the hierarchy is flat, so two instances of one definition would declare
+//! the same name twice and the later one would win. Where the value depends on a formal — exactly
+//! the case where the two instances disagree — that is refused with the parameter named, rather
+//! than quietly resolved to one instance's value (`.param`: general-mna#63; `.model`:
+//! general-mna#67). Either one that depends on nothing instance-specific passes through as it
+//! always has.
+//!
 //! **`.IC` inside a body**: a `.IC V(<node>)=` / `V(<n1>,<n2>)=` / `I(<element>)=` written inside
 //! a `.subckt` names that body's own nodes and elements, so each target goes through the very
 //! same resolution ([`mangle_ic_target`]) before the builder's unknown-name check sees it.
@@ -235,15 +243,47 @@ fn expand_body(
             // many times it is expanded, and passes through as it always has.
             Statement::Param(p) | Statement::GlobalParam(p) => {
                 for (name, raw) in &p.assignments {
-                    if substitute(raw) != *raw {
+                    let named = formals_named_in(raw, params);
+                    if !named.is_empty() {
                         return Err(format!(
-                            "line {}: '.param {name}' inside a .subckt body is written in terms \
-                             of a formal parameter, and a `.param` is global once the hierarchy \
-                             is flattened -- two instances would disagree about its value. Write \
+                            "line {}: '.param {name}'{} is written in terms of the formal \
+                             parameter{} {}, and a `.param` is global once the hierarchy is \
+                             flattened -- two instances would disagree about its value. Write \
                              the expression at the use site instead.",
-                            p.span.start
+                            p.span.start,
+                            written_inside(prefix),
+                            if named.len() == 1 { "" } else { "s" },
+                            named.join(", "),
                         ));
                     }
+                }
+                out.push(stmt.clone());
+            }
+            // A `.model`'s name has the same property a `.param`'s does -- global once the
+            // hierarchy is flat -- and none of the handling, which is general-mna#67. Two
+            // instances of a definition carrying `.model DX D(IS={Isat})` would emit two
+            // `.model DX` cards with different values, and whichever came last would win: the
+            // silent wrong answer the `.param` rule exists to refuse. So it is refused on the
+            // same grounds, rather than substituted into. A `.model` that depends on nothing
+            // instance-specific -- the only kind anything in this project writes today -- means
+            // the same thing however many times it is expanded and passes through untouched,
+            // including one written in terms of a global `.param`, which is not a formal and so
+            // is not named here.
+            Statement::Model(m) => {
+                let named = formals_named_in(&m.raw_params, params);
+                if !named.is_empty() {
+                    return Err(format!(
+                        "line {}: '.model {}'{} is written in terms of the formal parameter{} \
+                         {}, and a `.model`'s name is global once the hierarchy is flattened -- \
+                         two instances would emit the same model with different values and the \
+                         last one would win. Write the instance-specific value on the device \
+                         card instead, where each instance has its own.",
+                        m.span.start,
+                        m.name,
+                        written_inside(prefix),
+                        if named.len() == 1 { "" } else { "s" },
+                        named.join(", "),
+                    ));
                 }
                 out.push(stmt.clone());
             }
@@ -256,6 +296,17 @@ fn expand_body(
         }
     }
     Ok(out)
+}
+
+/// Where a refused body-level statement was written, for a message a reader can act on:
+/// `" inside instance 'X1.X2'"` when there is an instantiation path, and nothing at all at the
+/// true top level — where neither refusal can fire, since nothing declares a formal there, but
+/// where a bare line number would otherwise read as though an instance were involved.
+fn written_inside(prefix: &str) -> String {
+    match prefix.trim_end_matches('.') {
+        "" => String::new(),
+        path => format!(" inside instance '{path}'"),
+    }
 }
 
 /// Expands one `X`-instance: looks up its definition, builds the port-binding map (definition's
@@ -414,6 +465,49 @@ fn substitute_params(text: &str, params: &HashMap<String, String>) -> String {
     if params.is_empty() || !text.contains(['{', '\'']) {
         return text.to_string();
     }
+    rewrite_segments(text, |segment, out| {
+        out.push_str(&map_identifiers(segment, |ident| {
+            params.get(ident).map(|value| bound_text(value))
+        }));
+    })
+}
+
+/// Every parameter in `params` that one value's expression segments actually name, sorted and
+/// without repeats — the question [`expand_body`] asks of a `.param` or a `.model` written
+/// inside a body before refusing it.
+///
+/// It answers by **name** rather than by whether substituting changed the text, because the two
+/// differ in one case that matters: a parameter bound to its own name (`X1 a b def Rv=Rv`, where
+/// the caller declares no `Rv` either) substitutes to byte-identical text, so a
+/// changed-or-not test would call that body instance-independent when it is not. Sharing
+/// [`rewrite_segments`] and [`map_identifiers`] with [`substitute_params`] is what keeps the two
+/// answers about one piece of text — *does it depend on a formal* and *what does it become* —
+/// from drifting apart as the grammar they scan grows.
+fn formals_named_in(text: &str, params: &HashMap<String, String>) -> Vec<String> {
+    if params.is_empty() || !text.contains(['{', '\'']) {
+        return Vec::new();
+    }
+    let mut named: Vec<String> = Vec::new();
+    rewrite_segments(text, |segment, _| {
+        let _ = map_identifiers(segment, |ident| {
+            if params.contains_key(ident) && !named.iter().any(|seen| seen == ident) {
+                named.push(ident.to_string());
+            }
+            None
+        });
+    });
+    named.sort();
+    named
+}
+
+/// Walks `text` and rewrites only its expression segments: the inner text of each `{...}` and
+/// `'...'` is handed to `rewrite`, which appends whatever takes its place, and every byte
+/// outside a segment — including the delimiters themselves — is copied as written.
+///
+/// An unterminated segment is a malformed value, and the reader of that value says so with the
+/// line and the field named. Rewriting the fragment here would only move the complaint
+/// somewhere it makes less sense, so the remainder is copied unchanged.
+fn rewrite_segments(text: &str, mut rewrite: impl FnMut(&str, &mut String)) -> String {
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
     while let Some(open) = rest.find(['{', '\'']) {
@@ -426,13 +520,10 @@ fn substitute_params(text: &str, params: &HashMap<String, String>) -> String {
         let after = &rest[open + 1..];
         match after.find(close_char) {
             Some(close) => {
-                out.push_str(&substitute_identifiers(&after[..close], params));
+                rewrite(&after[..close], &mut out);
                 out.push(close_char);
                 rest = &after[close + 1..];
             }
-            // An unterminated segment is a malformed value, and the reader of that value says
-            // so with the line and the field named. Rewriting the fragment here would only
-            // move the complaint somewhere it makes less sense.
             None => {
                 out.push_str(after);
                 rest = "";
@@ -443,10 +534,10 @@ fn substitute_params(text: &str, params: &HashMap<String, String>) -> String {
     out
 }
 
-/// Rewrites every identifier in one expression segment that names a bound parameter. An
-/// identifier is `[A-Za-z_][A-Za-z0-9_]*`, scanned rather than split on, so `Rv` in `Rvalue`
-/// is not a match and `2*Rv` is.
-fn substitute_identifiers(segment: &str, params: &HashMap<String, String>) -> String {
+/// Rewrites every identifier in one expression segment for which `map` returns a replacement,
+/// and copies the rest. An identifier is `[A-Za-z_][A-Za-z0-9_]*`, scanned rather than split
+/// on, so `Rv` in `Rvalue` is not a match and `2*Rv` is.
+fn map_identifiers(segment: &str, mut map: impl FnMut(&str) -> Option<String>) -> String {
     let mut out = String::with_capacity(segment.len());
     let mut chars = segment.chars().peekable();
     while let Some(character) = chars.next() {
@@ -463,8 +554,8 @@ fn substitute_identifiers(segment: &str, params: &HashMap<String, String>) -> St
                 break;
             }
         }
-        match params.get(&ident) {
-            Some(value) => out.push_str(&bound_text(value)),
+        match map(&ident) {
+            Some(replacement) => out.push_str(&replacement),
             None => out.push_str(&ident),
         }
     }
